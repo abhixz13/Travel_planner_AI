@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 from langgraph.graph import StateGraph, END
-from typing import Dict, Any, List
 from core.state import GraphState
 from core.router_policy import route_after_extract
 from agents.plan_composer_agent import compose_itinerary
@@ -15,6 +14,14 @@ from agents.travel_options_agent import find_travel_options
 from agents.accommodation_agent import find_accommodation
 from agents.activities_agent import find_activities
 
+
+def _run_research(state: GraphState) -> GraphState:
+    """Run travel, stay, and activity research sequentially."""
+    find_travel_options(state)
+    find_accommodation(state)
+    find_activities(state)
+    return state
+
 def build_graph():
     """Wire LangGraph nodes & edges for the prototype."""
     g = StateGraph(GraphState)
@@ -23,9 +30,7 @@ def build_graph():
     g.add_node("extract_info", extract_travel_info)
     g.add_node("discover_destination", suggest_destinations)
     g.add_node("generate_plan", create_itinerary)
-    g.add_node("fetch_travel", find_travel_options)
-    g.add_node("fetch_stays", find_accommodation)
-    g.add_node("fetch_activities", find_activities)
+    g.add_node("run_research", _run_research)
     g.add_node("compose_response", compose_itinerary)
 
     # Entry + routing
@@ -37,15 +42,11 @@ def build_graph():
     )
     g.add_edge("discover_destination", "generate_plan")
 
-    # Fan-out (parallel) after planning
-    g.add_edge("generate_plan", "fetch_travel")
-    g.add_edge("generate_plan", "fetch_stays")
-    g.add_edge("generate_plan", "fetch_activities")
+    # Research fan-out handled inside run_research to guarantee completeness
+    g.add_edge("generate_plan", "run_research")
 
-    # Join into composer
-    g.add_edge("fetch_travel", "compose_response")
-    g.add_edge("fetch_stays", "compose_response")
-    g.add_edge("fetch_activities", "compose_response")
+    # Compose once all research is gathered
+    g.add_edge("run_research", "compose_response")
     g.add_edge("compose_response", END)
 
     return g.compile()
