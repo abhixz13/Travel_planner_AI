@@ -124,6 +124,10 @@ def find_travel_options(state: GraphState) -> GraphState:
     }
     """
     ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
+    if not ex.get("destination"):
+        print("DEBUG: No destination, skipping travel research")
+        return state
+
     origin = (ex.get("origin") or "").strip()
     dest = (ex.get("destination") or "").strip()
     when = (ex.get("departure_date") or "").strip() or f"{ex.get('duration_days','')} days"
@@ -139,10 +143,8 @@ def find_travel_options(state: GraphState) -> GraphState:
         }
         return state
 
-    context_prefix = (_PROMPT + "\n\n") if _FALLBACK_MODE else ""
-
     context = (
-        f"{context_prefix}TRIP CONTEXT:\n"
+        "TRIP CONTEXT:\n"
         f"- origin: {origin}\n"
         f"- destination: {dest}\n"
         f"- when: {when}\n"
@@ -151,19 +153,9 @@ def find_travel_options(state: GraphState) -> GraphState:
     )
 
     prior: List[BaseMessage] = list(state.get("messages", []))
-    if not dest:
-        state.setdefault("tool_results", {})["travel"] = {
-            "summary": "Once we lock a destination, I can pull travel options.",
-            "suggested_queries": [],
-            "results": [],
-        }
-        return state
-
     try:
-        prior: List[BaseMessage] = list(state.get("messages", []))
-        conversation = prior + [SystemMessage(content=context)]
         result = agent.invoke(
-            conversation,
+            {"messages": prior + [SystemMessage(content=context)]},
             config={"tags": ["agent:travel"], "metadata": {"node": "fetch_travel_options"}}
         )
     except Exception as exc:
@@ -202,7 +194,7 @@ def find_travel_options(state: GraphState) -> GraphState:
             summary = (m.content or summary).strip() or summary
             break
 
-    # Simple dedupe + cap at 12
+    # Simple dedupe + cap
     seen, deduped = set(), []
     for it in links:
         u = it["url"]

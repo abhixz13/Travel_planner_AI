@@ -22,6 +22,15 @@ def _run_research(state: GraphState) -> GraphState:
     find_activities(state)
     return state
 
+def route_after_discover(state: GraphState):
+    """Determine next step after destination discovery."""
+    ex = state.get("extracted_info", {}) or {}
+    has_destination = bool(ex.get("destination"))
+    has_dates = bool(ex.get("departure_date")) and bool(ex.get("return_date"))
+    has_duration = bool(ex.get("duration_days"))
+    ready_for_plan = has_destination and (has_dates or has_duration)
+    return "generate_plan" if ready_for_plan else "end"
+
 def build_graph():
     """Wire LangGraph nodes & edges for the prototype."""
     g = StateGraph(GraphState)
@@ -40,7 +49,11 @@ def build_graph():
         route_after_extract,
         {"ask_more": END, "discover": "discover_destination", "plan": "generate_plan"},
     )
-    g.add_edge("discover_destination", "generate_plan")
+    g.add_conditional_edges(
+        "discover_destination",
+        route_after_discover,
+        {"generate_plan": "generate_plan", "end": END},
+    )
 
     # Research fan-out handled inside run_research to guarantee completeness
     g.add_edge("generate_plan", "run_research")

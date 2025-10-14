@@ -37,10 +37,12 @@ def compose_itinerary(state: GraphState) -> GraphState:
     summary = plan.get("summary", "Trip plan")
     origin = plan.get("origin", "")
     dest = plan.get("destination", "")
+    dest_hint = plan.get("destination_hint", "")
     days = plan.get("duration_days", "")
     plan_line_bits: List[str] = []
     if origin: plan_line_bits.append(f"from **{origin}**")
     if dest: plan_line_bits.append(f"to **{dest}**")
+    elif dest_hint: plan_line_bits.append(f"toward **{dest_hint}**")
     if days: plan_line_bits.append(f"**{days} days**")
 
     # Branch payloads
@@ -80,9 +82,11 @@ def compose_itinerary(state: GraphState) -> GraphState:
 
     # One clear next step (prefer stays' follow-up if present)
     follow_up = stays.get("follow_up") if stays else None
-    lines.append(
-        "\n" + (follow_up or "Shall I shortlist hotels, compare neighborhoods, or look up flight options?")
-    )
+    if dest or dest_hint:
+        next_step = follow_up or "Shall I shortlist hotels, compare neighborhoods, or look up flight options?"
+    else:
+        next_step = "Want me to suggest destinations that fit your vibe?"
+    lines.append("\n" + next_step)
 
     handle_ai_output(state, "\n".join(lines))
     return state

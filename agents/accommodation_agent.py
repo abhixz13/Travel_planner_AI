@@ -126,6 +126,11 @@ def find_accommodation(state: GraphState) -> GraphState:
     }
     """
     ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
+    if not ex.get("destination"):
+        print("DEBUG: No destination, skipping accommodation research")
+        return state
+
+    ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
     dest = (ex.get("destination") or "").strip()
 
     if not dest:

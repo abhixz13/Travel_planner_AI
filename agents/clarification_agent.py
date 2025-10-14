@@ -18,6 +18,7 @@ def _looks_like_hint(text: str) -> bool:
         return False
     lower = text.lower()
     return any(token in lower for token in _HINT_TOKENS)
+
 from core.conversation_manager import last_user_message
 from core.state import GraphState, add_message
 

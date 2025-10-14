@@ -25,10 +25,14 @@ def route_after_extract(state: GraphState) -> Route:
     # Step 2: Check if destination info exists
     info = state.get("extracted_info", {})
     destination = (info.get("destination") or "").strip()
+    print(f"DEBUG: extracted_info = {info}")
+    print(f"DEBUG: destination = '{destination}'")
 
     # If no concrete destination is present, then discover
     if not destination:
+        print("DEBUG: Routing to 'discover' (no destination)")
         return "discover"
 
     # Step 3: Ready to plan
+    print("DEBUG: Routing to 'plan' (destination present)")
     return "plan"

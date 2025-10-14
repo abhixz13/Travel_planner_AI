@@ -30,6 +30,7 @@ def create_itinerary(state: GraphState) -> GraphState:
         "summary": f"{d}-day {(ex.get('trip_purpose') or 'trip')} for {(ex.get('travel_pack') or 'traveler(s)')}",
         "origin": ex.get("origin",""),
         "destination": ex.get("destination",""),
+        "destination_hint": ex.get("destination_hint",""),
         "start_date": ex.get("departure_date",""),
         "end_date": ex.get("return_date",""),
         "duration_days": d,

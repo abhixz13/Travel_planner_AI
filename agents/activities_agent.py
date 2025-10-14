@@ -91,16 +91,21 @@ def _build_agent():
 
 def find_activities(state: GraphState) -> GraphState:
     ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
+    if not ex.get("destination"):
+        print("DEBUG: No destination, skipping activities research")
+        return state
+
     # Upstream guarantees destination exists
     dest = ex.get("destination", "").strip()
 
-    if not dest:
-        state.setdefault("tool_results", {})["activities"] = {
-            "summary": "Once we decide on a destination I can suggest activities.",
-            "suggested_queries": [],
-            "results": [],
-        }
-        return state
+    context = (
+        "TRIP CONTEXT:\n"
+        f"- destination: {dest}\n"
+        f"- purpose: {ex.get('trip_purpose','')}\n"
+        f"- pack: {ex.get('travel_pack','')}\n"
+        f"- dates: {ex.get('departure_date','')} → {ex.get('return_date','')}\n"
+        "Use this context to form queries and call the tools. End with a brief summary."
+    )
 
     try:
         agent = _build_agent()
@@ -112,22 +117,10 @@ def find_activities(state: GraphState) -> GraphState:
         }
         return state
 
-    context_prefix = (_PROMPT + "\n\n") if _FALLBACK_MODE else ""
-
-    context = (
-        f"{context_prefix}TRIP CONTEXT:\n"
-        f"- destination: {dest}\n"
-        f"- purpose: {ex.get('trip_purpose','')}\n"
-        f"- pack: {ex.get('travel_pack','')}\n"
-        f"- dates: {ex.get('departure_date','')} → {ex.get('return_date','')}\n"
-        "Use this context to form queries and call the tools. End with a brief summary."
-    )
-
     prior: List[BaseMessage] = list(state.get("messages", []))
     try:
-        conversation = prior + [SystemMessage(content=context)]
         result = agent.invoke(
-            conversation,
+            {"messages": prior + [SystemMessage(content=context)]},
             config={"tags": ["agent:activities"], "metadata": {"node": "fetch_activities"}}
         )
     except Exception as exc:
