@@ -10,7 +10,10 @@ from core.state import GraphState
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage, AIMessage
 from langchain_core.tools import tool
-from langgraph.prebuilt import create_react_agent
+try:
+    from langgraph.prebuilt import create_react_agent
+except ImportError:  # Older langgraph releases
+    create_react_agent = None  # type: ignore
 
 # ----------------------------- Tools ------------------------------------------
 
@@ -72,20 +75,41 @@ def serp_travel(query: str) -> str:
 
 # --------------------------- Agent (ReAct) -----------------------------------
 
-_LLM = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
-
-_TRAVEL_AGENT = create_react_agent(
-    _LLM,
-    tools=[tavily_travel, serp_travel],
-    state_modifier=(
-        "You are a travel-options agent.\n"
-        "- Create 1–3 focused queries from the trip context to research: flights, driving time/route, nearby airports, and transfers.\n"
-        "- Prefer `tavily_travel` for curated roundups/how-tos; if thin or generic, also call `serp_travel` for breadth.\n"
-        "- Aggregate up to 12 useful, non-duplicated links.\n"
-        "- End with a brief 1–2 sentence user-facing summary.\n"
-        "Always use the tools for links; do not invent URLs."
-    ),
+_PROMPT = (
+    "You are a travel-options agent.\n"
+    "- Create 1–3 focused queries from the trip context to research: flights, driving time/route, nearby airports, and transfers.\n"
+    "- Prefer `tavily_travel` for curated roundups/how-tos; if thin or generic, also call `serp_travel` for breadth.\n"
+    "- Aggregate up to 12 useful, non-duplicated links.\n"
+    "- End with a brief 1–2 sentence user-facing summary.\n"
+    "Always use the tools for links; do not invent URLs."
 )
+
+_AGENT = None
+_FALLBACK_MODE = False
+
+
+def _build_agent():
+    global _AGENT, _FALLBACK_MODE
+    if _AGENT is not None:
+        return _AGENT
+
+    if create_react_agent is None:
+        raise RuntimeError("LangGraph version lacks create_react_agent; please upgrade langgraph>=0.1.5")
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY not set")
+
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
+    try:
+        _AGENT = create_react_agent(
+            llm,
+            tools=[tavily_travel, serp_travel],
+            state_modifier=_PROMPT,
+        )
+        _FALLBACK_MODE = False
+    except TypeError:
+        _AGENT = create_react_agent(llm, tools=[tavily_travel, serp_travel])
+        _FALLBACK_MODE = True
+    return _AGENT
 
 # ------------------------------ Node -----------------------------------------
 
@@ -104,8 +128,21 @@ def find_travel_options(state: GraphState) -> GraphState:
     dest = (ex.get("destination") or "").strip()
     when = (ex.get("departure_date") or "").strip() or f"{ex.get('duration_days','')} days"
 
+    # Build agent lazily; degrade gracefully if no key
+    try:
+        agent = _build_agent()
+    except RuntimeError:
+        state.setdefault("tool_results", {})["travel"] = {
+            "summary": "Cannot research travel options: OPENAI_API_KEY is not set.",
+            "suggested_queries": [],
+            "results": [],
+        }
+        return state
+
+    context_prefix = (_PROMPT + "\n\n") if _FALLBACK_MODE else ""
+
     context = (
-        "TRIP CONTEXT:\n"
+        f"{context_prefix}TRIP CONTEXT:\n"
         f"- origin: {origin}\n"
         f"- destination: {dest}\n"
         f"- when: {when}\n"
@@ -114,10 +151,28 @@ def find_travel_options(state: GraphState) -> GraphState:
     )
 
     prior: List[BaseMessage] = list(state.get("messages", []))
-    result = _TRAVEL_AGENT.invoke(
-        {"messages": prior + [SystemMessage(content=context)]},
-        config={"tags": ["agent:travel"], "metadata": {"node": "fetch_travel_options"}}
-    )
+    if not dest:
+        state.setdefault("tool_results", {})["travel"] = {
+            "summary": "Once we lock a destination, I can pull travel options.",
+            "suggested_queries": [],
+            "results": [],
+        }
+        return state
+
+    try:
+        prior: List[BaseMessage] = list(state.get("messages", []))
+        conversation = prior + [SystemMessage(content=context)]
+        result = agent.invoke(
+            conversation,
+            config={"tags": ["agent:travel"], "metadata": {"node": "fetch_travel_options"}}
+        )
+    except Exception as exc:
+        state.setdefault("tool_results", {})["travel"] = {
+            "summary": "Travel research failed: " + str(exc).split("\n")[0],
+            "suggested_queries": [],
+            "results": [],
+        }
+        return state
 
     messages: List[BaseMessage] = result.get("messages", []) if isinstance(result, dict) else []
     links: List[Dict[str, str]] = []

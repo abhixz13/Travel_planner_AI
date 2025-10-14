@@ -10,7 +10,10 @@ from core.state import GraphState
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage, AIMessage
 from langchain_core.tools import tool
-from langgraph.prebuilt import create_react_agent
+try:
+    from langgraph.prebuilt import create_react_agent
+except ImportError:  # Older langgraph releases
+    create_react_agent = None  # type: ignore
 
 # ----------------------------- Tools ------------------------------------------
 
@@ -72,20 +75,41 @@ def serp_stays(query: str) -> str:
 
 # --------------------------- Agent (ReAct) -----------------------------------
 
-_LLM = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
-
-_ACCOM_AGENT = create_react_agent(
-    _LLM,
-    tools=[tavily_stays, serp_stays],
-    state_modifier=(
-        "You are an accommodation-finder agent.\n"
-        "- Create 1–3 focused queries from the trip context (destination, dates, party, preferences).\n"
-        "- Prefer `tavily_stays` for curated neighborhood/hotel roundups; if thin or generic, also call `serp_stays` for breadth.\n"
-        "- Aggregate 3–8 useful, non-duplicated links.\n"
-        "- End with a brief 1–2 sentence summary for the user.\n"
-        "Always use the tools for links; do not invent URLs."
-    ),
+_PROMPT = (
+    "You are an accommodation-finder agent.\n"
+    "- Create 1–3 focused queries from the trip context (destination, dates, party, preferences).\n"
+    "- Prefer `tavily_stays` for curated neighborhood/hotel roundups; if thin or generic, also call `serp_stays` for breadth.\n"
+    "- Aggregate 3–8 useful, non-duplicated links.\n"
+    "- End with a brief 1–2 sentence summary for the user.\n"
+    "Always use the tools for links; do not invent URLs."
 )
+
+_AGENT = None
+_FALLBACK_MODE = False
+
+
+def _build_agent():
+    global _AGENT, _FALLBACK_MODE
+    if _AGENT is not None:
+        return _AGENT
+
+    if create_react_agent is None:
+        raise RuntimeError("LangGraph version lacks create_react_agent; please upgrade langgraph>=0.1.5")
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY not set")
+
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
+    try:
+        _AGENT = create_react_agent(
+            llm,
+            tools=[tavily_stays, serp_stays],
+            state_modifier=_PROMPT,
+        )
+        _FALLBACK_MODE = False
+    except TypeError:
+        _AGENT = create_react_agent(llm, tools=[tavily_stays, serp_stays])
+        _FALLBACK_MODE = True
+    return _AGENT
 
 # ------------------------------ Node -----------------------------------------
 
@@ -104,20 +128,48 @@ def find_accommodation(state: GraphState) -> GraphState:
     ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
     dest = (ex.get("destination") or "").strip()
 
+    if not dest:
+        state.setdefault("tool_results", {})["stays"] = {
+            "summary": "Once we pick a destination I can pull places to stay.",
+            "suggested_queries": [],
+            "results": [],
+        }
+        return state
+
+    try:
+        agent = _build_agent()
+    except RuntimeError:
+        state.setdefault("tool_results", {})["stays"] = {
+            "summary": "Cannot research stays: OPENAI_API_KEY is not set.",
+            "suggested_queries": [],
+            "results": [],
+        }
+        return state
+
+    context_prefix = (_PROMPT + "\n\n") if _FALLBACK_MODE else ""
+
     context = (
-        "TRIP CONTEXT:\n"
+        f"{context_prefix}TRIP CONTEXT:\n"
         f"- destination: {dest}\n"
         f"- dates: {ex.get('departure_date','')} → {ex.get('return_date','')}\n"
         f"- party: adults={ex.get('num_adults','')} kids={ex.get('kids_ages','')}\n"
         f"- purpose/preferences: {ex.get('trip_purpose','')} | pack: {ex.get('travel_pack','')}\n"
         "Use this context to form queries and call the tools. End with a brief summary."
     )
-
     prior: List[BaseMessage] = list(state.get("messages", []))
-    result = _ACCOM_AGENT.invoke(
-        {"messages": prior + [SystemMessage(content=context)]},
-        config={"tags": ["agent:accommodation"], "metadata": {"node": "fetch_accommodation"}}
-    )
+    try:
+        conversation = prior + [SystemMessage(content=context)]
+        result = agent.invoke(
+            conversation,
+            config={"tags": ["agent:accommodation"], "metadata": {"node": "fetch_accommodation"}}
+        )
+    except Exception as exc:
+        state.setdefault("tool_results", {})["stays"] = {
+            "summary": "Stay research failed: " + str(exc).split("\n")[0],
+            "suggested_queries": [],
+            "results": [],
+        }
+        return state
 
     messages: List[BaseMessage] = result.get("messages", []) if isinstance(result, dict) else []
     links: List[Dict[str, str]] = []

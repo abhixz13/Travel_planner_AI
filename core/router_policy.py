@@ -23,6 +23,8 @@ def route_after_extract(state: GraphState) -> Route:
     # Step 2: Check if destination info exists
     info = state.get("extracted_info", {})
     destination = (info.get("destination") or "").strip()
+    
+    # If no concrete destination is present, then discover
     if not destination:
         return "discover"
     

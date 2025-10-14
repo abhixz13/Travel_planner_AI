@@ -6,10 +6,14 @@ from core.state import GraphState
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage, AIMessage
 from langchain_core.tools import tool
-from langgraph.prebuilt import create_react_agent
+try:
+    from langgraph.prebuilt import create_react_agent
+except ImportError:  # Older langgraph releases
+    create_react_agent = None  # type: ignore
 
 @tool
 def serp_activities(query: str) -> str:
+    """Google (SerpAPI) search for activities at a destination; returns JSON list of {title,url,snippet}."""
     api = os.getenv("SERPAPI_API_KEY")
     if not api: return "[]"
     try:
@@ -32,6 +36,7 @@ def serp_activities(query: str) -> str:
 
 @tool
 def tavily_activities(query: str) -> str:
+    """Tavily search for activity roundups/guides; returns JSON list of {title,url,snippet}."""
     api = os.getenv("TAVILY_API_KEY")
     if not api: return "[]"
     try:
@@ -48,28 +53,69 @@ def tavily_activities(query: str) -> str:
     except Exception:
         return "[]"
 
-_LLM = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
-
-_AGENT = create_react_agent(
-    _LLM,
-    tools=[serp_activities, tavily_activities],
-    state_modifier=(
-        "You are an activities-finder agent.\n"
-        "- Create 1–3 focused queries from the trip context.\n"
-        "- Prefer `serp_activities` for breadth; if thin/generic, also call `tavily_activities`.\n"
-        "- Aggregate 5–8 strong, non-duplicated links.\n"
-        "- End with a brief 1–2 sentence summary for the user.\n"
-        "Always use the tools for links; do not invent URLs."
-    ),
+_PROMPT = (
+    "You are an activities-finder agent.\n"
+    "- Create 1–3 focused queries from the trip context.\n"
+    "- Prefer `serp_activities` for breadth; if thin/generic, also call `tavily_activities`.\n"
+    "- Aggregate 5–8 strong, non-duplicated links.\n"
+    "- End with a brief 1–2 sentence summary for the user.\n"
+    "Always use the tools for links; do not invent URLs."
 )
+
+_AGENT = None
+_FALLBACK_MODE = False
+
+
+def _build_agent():
+    global _AGENT, _FALLBACK_MODE
+    if _AGENT is not None:
+        return _AGENT
+
+    if create_react_agent is None:
+        raise RuntimeError("LangGraph version lacks create_react_agent; please upgrade langgraph>=0.1.5")
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError("OPENAI_API_KEY not set")
+
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
+    try:
+        _AGENT = create_react_agent(
+            llm,
+            tools=[serp_activities, tavily_activities],
+            state_modifier=_PROMPT,
+        )
+        _FALLBACK_MODE = False
+    except TypeError:
+        _AGENT = create_react_agent(llm, tools=[serp_activities, tavily_activities])
+        _FALLBACK_MODE = True
+    return _AGENT
 
 def find_activities(state: GraphState) -> GraphState:
     ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
     # Upstream guarantees destination exists
     dest = ex.get("destination", "").strip()
 
+    if not dest:
+        state.setdefault("tool_results", {})["activities"] = {
+            "summary": "Once we decide on a destination I can suggest activities.",
+            "suggested_queries": [],
+            "results": [],
+        }
+        return state
+
+    try:
+        agent = _build_agent()
+    except RuntimeError:
+        state.setdefault("tool_results", {})["activities"] = {
+            "summary": "Cannot research activities: OPENAI_API_KEY is not set.",
+            "suggested_queries": [],
+            "results": [],
+        }
+        return state
+
+    context_prefix = (_PROMPT + "\n\n") if _FALLBACK_MODE else ""
+
     context = (
-        "TRIP CONTEXT:\n"
+        f"{context_prefix}TRIP CONTEXT:\n"
         f"- destination: {dest}\n"
         f"- purpose: {ex.get('trip_purpose','')}\n"
         f"- pack: {ex.get('travel_pack','')}\n"
@@ -78,10 +124,19 @@ def find_activities(state: GraphState) -> GraphState:
     )
 
     prior: List[BaseMessage] = list(state.get("messages", []))
-    result = _AGENT.invoke(
-        {"messages": prior + [SystemMessage(content=context)]},
-        config={"tags": ["agent:activities"], "metadata": {"node": "fetch_activities"}}
-    )
+    try:
+        conversation = prior + [SystemMessage(content=context)]
+        result = agent.invoke(
+            conversation,
+            config={"tags": ["agent:activities"], "metadata": {"node": "fetch_activities"}}
+        )
+    except Exception as exc:
+        state.setdefault("tool_results", {})["activities"] = {
+            "summary": "Activities research failed: " + str(exc).split("\n")[0],
+            "suggested_queries": [],
+            "results": [],
+        }
+        return state
 
     messages: List[BaseMessage] = result.get("messages", []) if isinstance(result, dict) else []
     links: List[Dict[str, str]] = []
