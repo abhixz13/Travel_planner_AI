@@ -12,21 +12,23 @@ from core.state import GraphState
 # Possible next steps in routing
 Route = Literal["ask_more", "discover", "plan"]
 
+
 def route_after_extract(state: GraphState) -> Route:
     """Determine what to do next based on current state."""
-    
+
     # Step 1: Check if clarification is complete
-    clarification = state.get("tool_results", {}).get("clarification", {})
+    tools = state.get("tool_results") or {}
+    clarification = tools.get("clarification") or {}
     if clarification.get("status") != "complete":
         return "ask_more"
-    
+
     # Step 2: Check if destination info exists
     info = state.get("extracted_info", {})
     destination = (info.get("destination") or "").strip()
-    
+
     # If no concrete destination is present, then discover
     if not destination:
         return "discover"
-    
+
     # Step 3: Ready to plan
     return "plan"
