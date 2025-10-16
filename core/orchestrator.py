@@ -1,13 +1,14 @@
 # core/orchestrator.py
 
 from __future__ import annotations
-from typing import Any, Dict
+from typing import Any, Dict, Callable, Optional
 import logging
 
 from langgraph.graph import StateGraph, END
 from core.state import GraphState
 from core.router_policy import route_after_extract
 from agents.plan_composer_agent import compose_itinerary
+from core.fp import compute_fp
 
 # Agents/nodes
 from agents.clarification_agent import extract_travel_info
@@ -18,14 +19,6 @@ from agents.accommodation_agent import find_accommodation
 from agents.activities_agent import find_activities
 
 logger = logging.getLogger(__name__)
-
-# -----------------------------
-# MUST-HAVE helpers (minimal)
-# -----------------------------
-def _is_non_empty_mapping(value: Any) -> bool:
-    """True iff value is a non-empty dict."""
-    return isinstance(value, dict) and len(value) > 0
-
 
 def _ensure_plan_initialized(state: GraphState) -> None:
     """
@@ -60,67 +53,115 @@ def _ensure_plan_initialized(state: GraphState) -> None:
             logger.debug("Reset plan section '%s' to None due to unexpected type.", key)
 
 
-def _merge_section(plan: Dict[str, Any], key: str, patch: Dict[str, Any]) -> None:
-    """
-    Strict merge gate:
-    - Only merge if `patch` is a non-empty dict.
-    - Section is replaced with `patch` (source of truth comes from the agent).
-    """
-    if _is_non_empty_mapping(patch):
-        plan[key] = patch
-        logger.debug("Merged %s research results into plan.", key)
-    # else: ignore None, empty dict, or non-dicts (strict gate)
+def _should_merge(payload: Dict[str, Any]) -> bool:
+    """Return True if the payload satisfies merge requirements."""
+    if not isinstance(payload, dict):
+        return False
+    summary = payload.get("summary")
+    results = payload.get("results")
+    has_summary = isinstance(summary, str) and summary.strip() != ""
+    has_results = isinstance(results, list) and len(results) > 0
+    return has_summary or has_results
 
 
 # -----------------------------
 # Idempotent research runner
 # -----------------------------
 def _run_research(state: GraphState) -> GraphState:
-    """
-    Run travel, stays, and activities research with idempotence.
+    """Run research agents with fingerprint-based gating and strict merge rules."""
 
-    MUST-HAVES implemented:
-    1) Initialize normalized plan shape once.
-    2) Guarded calls: only call an agent if the section is None.
-    3) Strict merge gate: only merge when the agent returns a non-empty dict.
-    4) Agents are expected to RETURN patches (do not mutate current_plan directly).
-    """
+    SectionConfig = Dict[str, Any]
+
+    def _clean_str(value: Any) -> str:
+        return value.strip() if isinstance(value, str) else ""
+
+    def _travel_ready(ex: Dict[str, Any]) -> bool:
+        origin = _clean_str(ex.get("origin"))
+        destination = _clean_str(ex.get("destination"))
+        dep = _clean_str(ex.get("departure_date"))
+        ret = _clean_str(ex.get("return_date"))
+        return (
+            bool(origin)
+            and bool(destination)
+            and (bool(dep) or bool(ret) or bool(ex.get("duration_days")))
+        )
+
+    def _stays_ready(ex: Dict[str, Any]) -> bool:
+        destination = _clean_str(ex.get("destination"))
+        dep = _clean_str(ex.get("departure_date"))
+        ret = _clean_str(ex.get("return_date"))
+        return bool(destination and dep and ret)
+
+    def _activities_ready(ex: Dict[str, Any]) -> bool:
+        destination = _clean_str(ex.get("destination"))
+        return bool(destination)
+
+    section_map: Dict[str, SectionConfig] = {
+        "travel": {
+            "agent": find_travel_options,
+            "keys": ["origin", "destination", "departure_date", "return_date", "trip_purpose"],
+            "ready": _travel_ready,
+        },
+        "stays": {
+            "agent": find_accommodation,
+            "keys": ["destination", "departure_date", "return_date", "trip_purpose"],
+            "ready": _stays_ready,
+        },
+        "activities": {
+            "agent": find_activities,
+            "keys": ["destination", "trip_purpose"],
+            "ready": _activities_ready,
+        },
+    }
+
     _ensure_plan_initialized(state)
     plan = state["current_plan"]
+    ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
 
-    pending_sections = [key for key in ("travel", "stays", "activities") if plan.get(key) is None]
-    if pending_sections:
-        logger.info("Research pending for sections: %s.", ", ".join(pending_sections))
-    else:
-        logger.info("All research sections already populated; skipping web calls.")
-        return state
+    for section, cfg in section_map.items():
+        agent: Callable[[GraphState], Optional[Dict[str, Any]]] = cfg["agent"]
+        keys = cfg["keys"]
+        ready_fn = cfg["ready"]
 
-    # TRAVEL
-    if plan.get("travel") is None:
-        logger.debug("Running travel research.")
-        travel_patch = find_travel_options(state)  # expected: dict or None
-        if _is_non_empty_mapping(travel_patch):
-            _merge_section(plan, "travel", travel_patch)
-    else:
-        logger.debug("Skipping travel research; results already present.")
+        current_fp = compute_fp(ex, keys)
+        existing_value = plan.get(section)
+        existing_block = existing_value if isinstance(existing_value, dict) else None
+        prev_fp = existing_block.get("_fp") if isinstance(existing_block, dict) else None
 
-    # STAYS
-    if plan.get("stays") is None:
-        logger.debug("Running accommodation research.")
-        stays_patch = find_accommodation(state)  # expected: dict or None
-        if _is_non_empty_mapping(stays_patch):
-            _merge_section(plan, "stays", stays_patch)
-    else:
-        logger.debug("Skipping accommodation research; results already present.")
+        if prev_fp == current_fp:
+            logger.debug(
+                "Research gating: section=%s fp_prev=%s fp_curr=%s decision=skip merged=False",
+                section,
+                prev_fp,
+                current_fp,
+            )
+            continue
 
-    # ACTIVITIES
-    if plan.get("activities") is None:
-        logger.debug("Running activities research.")
-        activities_patch = find_activities(state)  # expected: dict or None
-        if _is_non_empty_mapping(activities_patch):
-            _merge_section(plan, "activities", activities_patch)
-    else:
-        logger.debug("Skipping activities research; results already present.")
+        if not ready_fn(ex):
+            logger.debug(
+                "Research gating: section=%s fp_prev=%s fp_curr=%s decision=skip merged=False (inputs incomplete)",
+                section,
+                prev_fp,
+                current_fp,
+            )
+            continue
+
+        patch = agent(state)
+        merged = False
+        if isinstance(patch, dict) and section in patch:
+            payload = patch[section]
+            if _should_merge(payload):
+                payload = dict(payload)
+                payload["_fp"] = current_fp
+                plan[section] = payload
+                merged = True
+        logger.debug(
+            "Research gating: section=%s fp_prev=%s fp_curr=%s decision=run merged=%s",
+            section,
+            prev_fp,
+            current_fp,
+            merged,
+        )
 
     return state
 

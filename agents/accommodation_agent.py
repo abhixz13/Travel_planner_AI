@@ -5,7 +5,7 @@ import json
 import os
 import re
 import logging
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import requests
 from core.conversation_manager import last_user_message
@@ -91,14 +91,44 @@ _PROMPT = (
 
 _AGENT = None
 _FALLBACK_MODE = False
-_YES_NO_REPLIES = {"yes", "no", "yep", "nope", "ok", "okay"}
+_ACK_REPLIES = {
+    "ok",
+    "okay",
+    "yes",
+    "yep",
+    "yeah",
+    "sure",
+    "sounds good",
+    "looks good",
+    "thanks",
+    "thank you",
+}
 
 
-def _is_brief_ack(message: str | None) -> bool:
+def _is_brief_ack(message: Optional[str]) -> bool:
     if not message:
         return False
-    cleaned = re.sub(r"[^\w\s]", "", message).strip().lower()
-    return cleaned in _YES_NO_REPLIES
+    cleaned = re.sub(r"[^a-zA-Z\s]", "", message).strip().lower()
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned in _ACK_REPLIES
+
+
+def _normalize_links(links: List[Dict[str, Any]], limit: int) -> List[Dict[str, str]]:
+    seen = set()
+    normalized: List[Dict[str, str]] = []
+    for entry in links:
+        if not isinstance(entry, dict):
+            continue
+        url = str(entry.get("url", "") or "").strip()
+        if not url or url in seen:
+            continue
+        title = str(entry.get("title", "") or "").strip() or "Link"
+        snippet = str(entry.get("snippet", "") or "")
+        normalized.append({"title": title, "url": url, "snippet": snippet})
+        seen.add(url)
+        if len(normalized) >= limit:
+            break
+    return normalized
 
 
 def _build_agent():
@@ -126,39 +156,39 @@ def _build_agent():
 
 # ------------------------------ Node -----------------------------------------
 
-def find_accommodation(state: GraphState) -> GraphState:
+def find_accommodation(state: GraphState) -> Optional[Dict[str, Any]]:
     ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
-    if not ex.get("destination"):
-        logger.debug("Accommodation agent: destination missing; deferring research.")
-        state.setdefault("tool_results", {})["stays"] = {
-            "summary": "Once we pick a destination I can pull places to stay.",
-            "suggested_queries": [],
-            "results": [],
-        }
-        return state
+    logger.debug("Accommodation agent input keys: %s", sorted(ex.keys()))
 
     if _is_brief_ack(last_user_message(state)):
-        logger.debug("Accommodation agent: latest user turn is acknowledgement; skipping fetch.")
-        return state
+        logger.debug("Accommodation agent: acknowledgement detected; returning None.")
+        return None
 
     dest = (ex.get("destination") or "").strip()
+    dep = (ex.get("departure_date") or "").strip()
+    ret = (ex.get("return_date") or "").strip()
+
+    if not (dest and dep and ret):
+        logger.debug("Accommodation agent: inputs incomplete for research; returning None.")
+        return None
+
     try:
         agent = _build_agent()
     except RuntimeError:
-        logger.debug("Accommodation agent: OPENAI_API_KEY missing; recording failure message.")
-        state.setdefault("tool_results", {})["stays"] = {
+        logger.debug("Accommodation agent: OPENAI_API_KEY missing; returning failure patch.")
+        payload = {
             "summary": "Cannot research stays: OPENAI_API_KEY is not set.",
-            "suggested_queries": [],
             "results": [],
         }
-        return state
+        logger.debug("Accommodation agent collected %d links; returning patch.", 0)
+        state.setdefault("tool_results", {})["stays"] = payload
+        return {"stays": payload}
 
     context_prefix = (_PROMPT + "\n\n") if _FALLBACK_MODE else ""
-
     context = (
         f"{context_prefix}TRIP CONTEXT:\n"
         f"- destination: {dest}\n"
-        f"- dates: {ex.get('departure_date','')} → {ex.get('return_date','')}\n"
+        f"- dates: {dep} → {ret}\n"
         f"- party: adults={ex.get('num_adults','')} kids={ex.get('kids_ages','')}\n"
         f"- purpose/preferences: {ex.get('trip_purpose','')} | pack: {ex.get('travel_pack','')}\n"
         "Use this context to form queries and call the tools. End with a brief summary."
@@ -166,74 +196,64 @@ def find_accommodation(state: GraphState) -> GraphState:
     logger.debug(
         "Accommodation agent invoking ReAct for destination=%s dates=%s→%s",
         dest,
-        ex.get("departure_date", ""),
-        ex.get("return_date", ""),
+        dep,
+        ret,
     )
     try:
         result = agent.invoke(
             {"messages": [SystemMessage(content=context)]},
-            config={"tags": ["agent:accommodation"], "metadata": {"node": "fetch_accommodation"}}
+            config={"tags": ["agent:accommodation"], "metadata": {"node": "fetch_accommodation"}},
         )
     except Exception as exc:
         logger.exception("Accommodation agent invocation failed.")
-        state.setdefault("tool_results", {})["stays"] = {
+        payload = {
             "summary": "Stay research failed: " + str(exc).split("\n")[0],
-            "suggested_queries": [],
             "results": [],
         }
-        return state
+        logger.debug("Accommodation agent collected %d links; returning patch.", 0)
+        state.setdefault("tool_results", {})["stays"] = payload
+        return {"stays": payload}
 
     if not isinstance(result, dict):
-        state.setdefault("tool_results", {})["stays"] = {
+        payload = {
             "summary": "Stays research completed, but returned no structured results this time. I can try again or refine the query.",
-            "suggested_queries": [],
             "results": [],
         }
-        return state  # ← return only in the non-dict branch
-    
+        logger.debug("Accommodation agent collected %d links; returning patch.", 0)
+        state.setdefault("tool_results", {})["stays"] = payload
+        return {"stays": payload}
 
     messages = result.get("messages", []) if isinstance(result, dict) else []
-    links: List[Dict[str, str]] = []
+    collected: List[Dict[str, Any]] = []
 
-    # Collect tool payloads (each tool returns a JSON list)
     for m in messages:
         if isinstance(m, ToolMessage):
             try:
                 payload = json.loads(m.content or "[]")
-                if isinstance(payload, list):
-                    for it in payload:
-                        if isinstance(it, dict):
-                            url = (it.get("url") or "").strip()
-                            if url:
-                                links.append({
-                                    "title": it.get("title", "") or "",
-                                    "url": url,
-                                    "snippet": it.get("snippet", "") or "",
-                                })
             except Exception:
-                pass
+                payload = []
+            if isinstance(payload, list):
+                collected.extend([it for it in payload if isinstance(it, dict)])
 
-    # Last AI message (not a ToolMessage) is the human-facing summary
     summary = "Here are useful stay/area links."
     for m in reversed(messages):
         if isinstance(m, AIMessage):
-            summary = (m.content or summary).strip() or summary
-            break
+            candidate = (m.content or "").strip()
+            if candidate:
+                summary = candidate
+                break
 
-    # Simple dedupe + cap
-    seen, deduped = set(), []
-    for it in links:
-        u = it["url"]
-        if u and u not in seen:
-            seen.add(u)
-            deduped.append(it)
-        if len(deduped) >= 8:
-            break
+    results = _normalize_links(collected, limit=8)
 
-    state.setdefault("tool_results", {})["stays"] = {
-        "summary": summary,
-        "suggested_queries": [],  # agent internalizes the queries
-        "results": deduped,
-    }
-    logger.debug("Accommodation agent stored %d stay links.", len(deduped))
-    return state
+    payload = {"summary": summary, "results": results}
+    logger.debug(
+        "Accommodation agent collected %d links; returning %s.",
+        len(results),
+        "patch" if results or summary else "None",
+    )
+
+    if not (summary.strip() or results):
+        return None
+
+    state.setdefault("tool_results", {})["stays"] = payload
+    return {"stays": payload}
