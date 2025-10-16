@@ -3,12 +3,15 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import logging
 from typing import Any, Dict, List
 
 import requests
+from core.conversation_manager import last_user_message
 from core.state import GraphState
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage, AIMessage
+from langchain_core.messages import SystemMessage, ToolMessage, AIMessage
 from langchain_core.tools import tool
 try:
     from langgraph.prebuilt import create_react_agent
@@ -16,6 +19,9 @@ except ImportError:  # Older langgraph releases
     create_react_agent = None  # type: ignore
 
 # ----------------------------- Tools ------------------------------------------
+
+logger = logging.getLogger(__name__)
+
 
 @tool
 def tavily_travel(query: str) -> str:
@@ -86,6 +92,14 @@ _PROMPT = (
 
 _AGENT = None
 _FALLBACK_MODE = False
+_YES_NO_REPLIES = {"yes", "no", "yep", "nope", "ok", "okay"}
+
+
+def _is_brief_ack(message: str | None) -> bool:
+    if not message:
+        return False
+    cleaned = re.sub(r"[^\w\s]", "", message).strip().lower()
+    return cleaned in _YES_NO_REPLIES
 
 
 def _build_agent():
@@ -125,7 +139,11 @@ def find_travel_options(state: GraphState) -> GraphState:
     """
     ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
     if not ex.get("destination"):
-        print("DEBUG: No destination, skipping travel research")
+        logger.debug("Travel agent: destination missing; skipping research.")
+        return state
+
+    if _is_brief_ack(last_user_message(state)):
+        logger.debug("Travel agent: latest user message is acknowledgement; skipping fetch.")
         return state
 
     origin = (ex.get("origin") or "").strip()
@@ -136,6 +154,7 @@ def find_travel_options(state: GraphState) -> GraphState:
     try:
         agent = _build_agent()
     except RuntimeError:
+        logger.debug("Travel agent: OPENAI_API_KEY missing; recording failure message.")
         state.setdefault("tool_results", {})["travel"] = {
             "summary": "Cannot research travel options: OPENAI_API_KEY is not set.",
             "suggested_queries": [],
@@ -151,14 +170,20 @@ def find_travel_options(state: GraphState) -> GraphState:
         "Research flights, driving time/routes, nearby airports, and transfer options. "
         "Form 1–3 concise queries and call the tools. End with a brief summary."
     )
+    logger.debug(
+        "Travel agent invoking ReAct with origin=%s destination=%s when=%s",
+        origin,
+        dest,
+        when,
+    )
 
-    prior: List[BaseMessage] = list(state.get("messages", []))
     try:
         result = agent.invoke(
-            {"messages": prior + [SystemMessage(content=context)]},
+            {"messages": [SystemMessage(content=context)]},
             config={"tags": ["agent:travel"], "metadata": {"node": "fetch_travel_options"}}
         )
     except Exception as exc:
+        logger.exception("Travel agent invocation failed.")
         state.setdefault("tool_results", {})["travel"] = {
             "summary": "Travel research failed: " + str(exc).split("\n")[0],
             "suggested_queries": [],
@@ -166,7 +191,7 @@ def find_travel_options(state: GraphState) -> GraphState:
         }
         return state
 
-    messages: List[BaseMessage] = result.get("messages", []) if isinstance(result, dict) else []
+    messages = result.get("messages", []) if isinstance(result, dict) else []
     links: List[Dict[str, str]] = []
 
     # Collect tool payloads (each tool returns a JSON list)
@@ -209,4 +234,5 @@ def find_travel_options(state: GraphState) -> GraphState:
         "suggested_queries": [],  # agent internalizes the queries
         "results": deduped,
     }
+    logger.debug("Travel agent stored %d travel links.", len(deduped))
     return state

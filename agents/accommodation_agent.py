@@ -3,17 +3,22 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import logging
 from typing import Any, Dict, List
 
 import requests
+from core.conversation_manager import last_user_message
 from core.state import GraphState
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage, AIMessage
+from langchain_core.messages import SystemMessage, ToolMessage, AIMessage
 from langchain_core.tools import tool
 try:
     from langgraph.prebuilt import create_react_agent
 except ImportError:  # Older langgraph releases
     create_react_agent = None  # type: ignore
+
+logger = logging.getLogger(__name__)
 
 # ----------------------------- Tools ------------------------------------------
 
@@ -86,6 +91,14 @@ _PROMPT = (
 
 _AGENT = None
 _FALLBACK_MODE = False
+_YES_NO_REPLIES = {"yes", "no", "yep", "nope", "ok", "okay"}
+
+
+def _is_brief_ack(message: str | None) -> bool:
+    if not message:
+        return False
+    cleaned = re.sub(r"[^\w\s]", "", message).strip().lower()
+    return cleaned in _YES_NO_REPLIES
 
 
 def _build_agent():
@@ -114,26 +127,9 @@ def _build_agent():
 # ------------------------------ Node -----------------------------------------
 
 def find_accommodation(state: GraphState) -> GraphState:
-    """
-    Runs a ReAct agent that uses Tavily + SerpAPI to fetch accommodation/area links.
-
-    Upstream guarantees destination exists.
-
-    Writes: state['tool_results']['stays'] = {
-        "summary": str,
-        "suggested_queries": [],              # agent internalizes queries
-        "results": List[{title,url,snippet}]  # up to 8
-    }
-    """
     ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
     if not ex.get("destination"):
-        print("DEBUG: No destination, skipping accommodation research")
-        return state
-
-    ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
-    dest = (ex.get("destination") or "").strip()
-
-    if not dest:
+        logger.debug("Accommodation agent: destination missing; deferring research.")
         state.setdefault("tool_results", {})["stays"] = {
             "summary": "Once we pick a destination I can pull places to stay.",
             "suggested_queries": [],
@@ -141,9 +137,15 @@ def find_accommodation(state: GraphState) -> GraphState:
         }
         return state
 
+    if _is_brief_ack(last_user_message(state)):
+        logger.debug("Accommodation agent: latest user turn is acknowledgement; skipping fetch.")
+        return state
+
+    dest = (ex.get("destination") or "").strip()
     try:
         agent = _build_agent()
     except RuntimeError:
+        logger.debug("Accommodation agent: OPENAI_API_KEY missing; recording failure message.")
         state.setdefault("tool_results", {})["stays"] = {
             "summary": "Cannot research stays: OPENAI_API_KEY is not set.",
             "suggested_queries": [],
@@ -161,14 +163,19 @@ def find_accommodation(state: GraphState) -> GraphState:
         f"- purpose/preferences: {ex.get('trip_purpose','')} | pack: {ex.get('travel_pack','')}\n"
         "Use this context to form queries and call the tools. End with a brief summary."
     )
-    prior: List[BaseMessage] = list(state.get("messages", []))
+    logger.debug(
+        "Accommodation agent invoking ReAct for destination=%s dates=%s→%s",
+        dest,
+        ex.get("departure_date", ""),
+        ex.get("return_date", ""),
+    )
     try:
-        conversation = prior + [SystemMessage(content=context)]
         result = agent.invoke(
-            conversation,
+            {"messages": [SystemMessage(content=context)]},
             config={"tags": ["agent:accommodation"], "metadata": {"node": "fetch_accommodation"}}
         )
     except Exception as exc:
+        logger.exception("Accommodation agent invocation failed.")
         state.setdefault("tool_results", {})["stays"] = {
             "summary": "Stay research failed: " + str(exc).split("\n")[0],
             "suggested_queries": [],
@@ -176,7 +183,16 @@ def find_accommodation(state: GraphState) -> GraphState:
         }
         return state
 
-    messages: List[BaseMessage] = result.get("messages", []) if isinstance(result, dict) else []
+    if not isinstance(result, dict):
+        state.setdefault("tool_results", {})["stays"] = {
+            "summary": "Stays research completed, but returned no structured results this time. I can try again or refine the query.",
+            "suggested_queries": [],
+            "results": [],
+        }
+        return state  # ← return only in the non-dict branch
+    
+
+    messages = result.get("messages", []) if isinstance(result, dict) else []
     links: List[Dict[str, str]] = []
 
     # Collect tool payloads (each tool returns a JSON list)
@@ -219,4 +235,5 @@ def find_accommodation(state: GraphState) -> GraphState:
         "suggested_queries": [],  # agent internalizes the queries
         "results": deduped,
     }
+    logger.debug("Accommodation agent stored %d stay links.", len(deduped))
     return state

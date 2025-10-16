@@ -1,8 +1,11 @@
 # core/conversation_manager.py
 from __future__ import annotations
 from typing import List, Dict, Optional
+import logging
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage, SystemMessage, ToolMessage
 from core.state import GraphState, new_state, add_message
+
+logger = logging.getLogger(__name__)
 
 # --- Lifecycle ---------------------------------------------------------------
 
@@ -11,18 +14,23 @@ def initiate_conversation(system_prompt: Optional[str] = None) -> GraphState:
     state = new_state()
     if system_prompt:
         add_message(state, SystemMessage(content=system_prompt))
+        logger.debug("Initiated conversation with system prompt.")
+    else:
+        logger.debug("Initiated conversation without system prompt.")
     return state
 
 def handle_user_input(state: GraphState, user_input: str) -> GraphState:
     """Append a user message (ignores empty/whitespace-only)."""
     if user_input and user_input.strip():
         add_message(state, HumanMessage(content=user_input.strip()))
+        logger.debug("Captured user input: %s", user_input.strip())
     return state
 
 def handle_ai_output(state: GraphState, text: str) -> GraphState:
     """Append an AI message; handy for nodes that directly speak to user."""
     if text and text.strip():
         add_message(state, AIMessage(content=text.strip()))
+        logger.debug("Queued AI output: %s", text.strip())
     return state
 
 # --- History utilities -------------------------------------------------------
@@ -56,4 +64,5 @@ def trim_history(state: GraphState, max_messages: int = 30) -> GraphState:
     msgs: List[BaseMessage] = state.get("messages", [])
     if len(msgs) > max_messages:
         state["messages"] = msgs[-max_messages:]
+        logger.debug("Trimmed conversation history to last %d messages.", max_messages)
     return state

@@ -1,10 +1,23 @@
-"""Simple clarification agent - extract trip info, ask what's missing."""
+"""Extract trip info, confirm once, and avoid repeat confirmations."""
 
+from __future__ import annotations
 from datetime import datetime
+import logging
+import hashlib
+import json as _json
 import json
 import re
+from typing import Dict, Any, List
+
 from langchain_openai import ChatOpenAI
 from langchain_core.messages import AIMessage, HumanMessage
+
+from core.conversation_manager import last_user_message
+from core.state import GraphState, add_message
+
+logger = logging.getLogger(__name__)
+
+# --- tiny helpers ------------------------------------------------------------
 
 _HINT_TOKENS = {
     "any", "some", "somewhere", "anywhere", "open", "suggest", "kid",
@@ -12,242 +25,271 @@ _HINT_TOKENS = {
     "around", "close", "within", "drive", "options", "ideas", "recommend",
 }
 
-
 def _looks_like_hint(text: str) -> bool:
     if not text:
         return False
     lower = text.lower()
-    return any(token in lower for token in _HINT_TOKENS)
+    return any(t in lower for t in _HINT_TOKENS)
 
-from core.conversation_manager import last_user_message
-from core.state import GraphState, add_message
+def _normalize_for_yesno(text: str) -> str:
+    # lowercase and strip punctuation to make token checks robust (e.g., "okay," → "okay")
+    t = (text or "").lower()
+    t = re.sub(r"[^\w\s]", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
 
 def _is_confirmation(text: str) -> bool:
-    """Check if user is confirming/agreeing."""
-    text = text.lower().strip()
-    positive = {"yes", "yep", "yeah", "correct", "right", "sure", "ok", "okay", 
-                "good", "great", "perfect", "sounds good", "looks good", "confirmed"}
-    negative = {"no", "nope", "not", "wrong", "incorrect", "change", "actually"}
-    
-    if any(neg in text.split() for neg in negative):
+    t = _normalize_for_yesno(text)
+    # Require a whole-word match to avoid false positives inside other words
+    pos = r"\b(yes|yep|yeah|correct|right|sure|ok|okay|good|great|perfect|sounds good|looks good|confirmed)\b"
+    neg = r"\b(no|nope|not|wrong|incorrect|change|actually)\b"
+    if re.search(neg, t):
         return False
-    return any(pos in text.split() for pos in positive)
+    return bool(re.search(pos, t))
+
+def _hash_required(info: Dict[str, Any]) -> str:
+    """Stable fingerprint of the fields we confirm."""
+    key = {
+        "origin": info.get("origin"),
+        "departure_date": info.get("departure_date"),
+        "return_date": info.get("return_date"),
+        "trip_purpose": info.get("trip_purpose"),
+        "travel_pack": info.get("travel_pack"),
+        "destination": info.get("destination"),
+    }
+    return hashlib.sha1(_json.dumps(key, sort_keys=True).encode()).hexdigest()
+
+
+# --- main node ---------------------------------------------------------------
 
 def extract_travel_info(state: GraphState) -> GraphState:
-    """Extract trip info from conversation. Ask for missing essentials."""
-    
-    # Only run when we have a new user message
+    """Extract essentials, confirm once, and skip re-asking when unchanged."""
     latest_user = last_user_message(state)
     if not latest_user or not latest_user.strip():
+        logger.debug("Clarification agent: no new user input; returning state.")
         return state
-    
+    logger.debug("Clarification agent processing user input: %s", latest_user.strip())
+
+    # Initialize shared refs ONCE
     info = state.setdefault("extracted_info", {})
     tools = state.setdefault("tool_results", {})
-    
-    # Handle confirmation flow
-    clarification_status = tools.get("clarification", {})
-    if clarification_status.get("status") == "awaiting_confirmation":
+    clar = tools.get("clarification", {}) or {}
+
+    # --- handle destination choice from discovery (numeric or name) ----------
+    discovery = tools.setdefault("discovery", {})
+    suggestions = discovery.get("suggestions") or []
+    if suggestions:
+        logger.debug("Clarification agent sees %d pending suggestions.", len(suggestions))
+        raw = latest_user.strip()
+        picked_name = None
+
+        # Try to extract the first 1–2 digit number as the user's choice
+        m_num = re.search(r"\b(\d{1,2})\b", raw)
+        if m_num:
+            idx = int(m_num.group(1)) - 1
+            if 0 <= idx < len(suggestions):
+                picked_name = (suggestions[idx].get("name") or "").strip()
+                logger.debug("Clarification agent parsed numeric selection -> %s.", picked_name)
+
+        # Fallback: free-text fuzzy match against suggestion names
+        if not picked_name:
+            low = raw.lower()
+            for s in suggestions:
+                name = (s.get("name") or "").strip()
+                if not name:
+                    continue
+                nlow = name.lower()
+                if low == nlow or nlow.startswith(low) or low in nlow:
+                    picked_name = name
+                    break
+
+        if picked_name:
+            info["destination"] = picked_name
+            # Mark discovery resolved and optionally clear suggestions to avoid re-matching later
+            discovery["resolved"] = True
+            discovery["suggestions"] = []
+            # Mark clarification complete for this combo to avoid re-asking
+            tools["clarification"] = {
+                "status": "complete",
+                "confirmed_hash": _hash_required(info),
+            }
+            logger.debug("Destination '%s' selected; discovery resolved.", picked_name)
+            add_message(state, AIMessage(content=f"Got it — **{picked_name}**. I’ll plan around that."))
+            return state
+        else:
+            logger.debug("Clarification agent awaiting valid selection matching suggestions.")
+
+    # If we're waiting for a Yes/No, handle it first.
+    if clar.get("status") == "awaiting_confirmation":
         if _is_confirmation(latest_user):
-            tools["clarification"] = {"status": "complete"}
+            tools["clarification"] = {
+                "status": "complete",
+                "confirmed_hash": _hash_required(info),
+            }
+            state.setdefault("ui_flags", {})["confirmed"] = True
+            logger.debug("Clarification confirmation received; marking complete.")
             add_message(state, AIMessage(content="Perfect! Let me find great options for you."))
             return state
         else:
-            # User is correcting - re-extract
             tools["clarification"] = {"status": "incomplete"}
-    
-    # Prevent loops - max 3 attempts
-    attempts = state.get("clarification_attempts", 0)
-    if attempts >= 3:
-        tools["clarification"] = {"status": "complete"}
-        add_message(state, AIMessage(content="Let me work with what we have."))
-        return state
-    
-    # Get recent USER messages only
-    messages = state.get("messages", [])
-    recent_user_messages = []
-    for msg in reversed(messages[-10:]):
-        if isinstance(msg, HumanMessage):
-            recent_user_messages.append(msg.content)
-            if len(recent_user_messages) >= 3:
+            logger.debug("Clarification confirmation not detected; marking incomplete.")
+
+    # Build a compact conversation context (last 3 user messages)
+    msgs: List[Any] = state.get("messages", [])
+    recent_user_msgs: List[str] = []
+    for m in reversed(msgs[-10:]):
+        if isinstance(m, HumanMessage):
+            recent_user_msgs.append(m.content)
+            if len(recent_user_msgs) >= 3:
                 break
-    
-    conversation = "\n".join([f"User: {m}" for m in reversed(recent_user_messages)])
-    
-    # Get current date for LLM context
+    conversation = "\n".join(f"User: {m}" for m in reversed(recent_user_msgs))
+
+    # Call LLM once to (re)parse essentials
     today = datetime.now()
-    
-    # Single LLM call - trust it to understand dates semantically
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
-    
-    prompt = f"""Extract trip information from natural conversation. Use semantic understanding.
 
-TODAY: {today.strftime("%A, %B %d, %Y")} (it's a {today.strftime("%A")})
+    system_prompt = f"""
+        - You are a travel information extractor. Extract trip details from natural conversation\n
+        - Return ONLY valid JSON matching the exact schema\n
+        - Extract only what is explicitly stated or strongly implied\n
+        - Don't invent or assume information\n
+        - Be concise - no additional commentary\n
+        - If information is unclear or missing, list it in the 'missing' array\n
+    """
 
-Conversation:
-{conversation}
+    prompt = f"""Extract trip information from natural conversation.
 
-Already extracted: {json.dumps(info, indent=2)}
+        CRITICAL RULES:
+        - Use JSON null (not string "null") for missing/unknown values
+        - Only set "destination" if user explicitly names a specific place
+        - If destination is vague/uncertain, leave it as null and set "destination_hint" instead
+        - Examples of what NOT to set as destination: "somewhere", "anywhere", "beach", "mountains"
 
-Return valid JSON:
-{{
-  "origin": "city",
-  "destination": "city or null",
-  "departure_date": "YYYY-MM-DD",
-  "return_date": "YYYY-MM-DD",
-  "duration_days": 2,
-  "trip_purpose": "activities/goals",
-  "travel_pack": "solo/family/couple/friends/etc",
-  "constraints": {{}},
-  "missing": []
-}}
+        TODAY: {today.strftime("%A, %B %d, %Y")}
 
-DATE INTERPRETATION (use common sense):
-- "this weekend" = the upcoming Saturday-Sunday from today
-- "next weekend" = the weekend after this weekend
-- "coming weekend" = usually means this weekend
-- "long weekend" = typically 3 days (Fri-Sun or Sat-Mon)
-- "Oct 17" in October 2025 = 2025-10-17
-- "2 days" starting Friday = Friday + Saturday (return Sunday)
+        Conversation:
+        {conversation}
 
-SEMANTIC RULES:
-- "weekend trip" = Saturday to Sunday (2 days, return Sunday evening)
-- "week trip" = 7 days
-- "with family" = travel_pack: "family"
-- "kids-friendly" or "toddler" mentioned = note in trip_purpose or constraints
+        Already extracted: {json.dumps(info, indent=2)}
 
-BUILD ON EXISTING:
-- Don't erase good data
-- Update if user corrects something
-- Combine related info intelligently
+        Return ONLY valid JSON like:
+        {{
+        "origin": "city name or null",
+        "destination": "city name or null", // ONLY specific places; use null otherwise
+        "destination_hint": "vague location or null", // only set if destination is vague/uncertain
+        "departure_date": "YYYY-MM-DD",
+        "return_date": "YYYY-MM-DD",
+        "duration_days": 2,
+        "trip_purpose": "activities/goals",
+        "travel_pack": "solo|family|couple|friends|other",
+        "constraints": {{}},
+        "missing": []
+        }}
 
-REQUIRED: origin, (departure_date + return_date), trip_purpose, travel_pack
-OPTIONAL: destination, destination_hint, constraints, duration_days
-
-List ONLY missing required fields in "missing" array. If all required present, return empty array."""
+        REQUIRED FIELDS: origin, departure_date, return_date, trip_purpose, travel_pack
+        - List required fields that are missing or null in the "missing" array
+        - "destination" is optional - only include if explicitly mentioned
+        - "duration_days" is optional - can be computed from dates
+        - If travel_pack is implied (e.g., "family trip"), set travel_pack="family" and don't include in missing
+        - If dates can be reasonably inferred (e.g., "this weekend"), set the specific dates and don't include in missing
+        """
 
     try:
-        response = llm.invoke([{"role": "user", "content": prompt}])
-        content = response.content.strip()
-        
-        # Extract JSON
-        json_match = re.search(r'\{.*\}', content, re.DOTALL)
-        if not json_match:
+        resp = llm.invoke([
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": prompt}
+        ])
+        text = (resp.content or "").strip()
+        m = re.search(r"\{.*\}", text, re.DOTALL)
+        if not m:
             raise ValueError("No JSON in response")
-        
-        result = json.loads(json_match.group(0))
-        
-        # Update info with extracted values (skip nulls/empties)
-        hint = result.get("destination_hint")
-        if hint not in [None, "", {}, []]:
+        parsed = json.loads(m.group(0))
+        logger.debug("Clarification agent parsed extraction payload: %s", parsed)
+
+        # Write back parsed fields (skip empties)
+        hint = parsed.get("destination_hint")
+        if hint not in (None, "", {}, []):
             info["destination_hint"] = hint
 
         for key in [
-            "origin",
-            "destination",
-            "departure_date",
-            "return_date",
-            "duration_days",
-            "trip_purpose",
-            "travel_pack",
-            "constraints",
+            "origin", "destination", "departure_date", "return_date",
+            "duration_days", "trip_purpose", "travel_pack", "constraints"
         ]:
-            value = result.get(key)
-            if value in [None, "", {}, []]:
+            val = parsed.get(key)
+            if val in (None, "", {}, []):
                 continue
             if key == "destination":
-                text = str(value).strip()
-                if text and _looks_like_hint(text):
-                    info["destination_hint"] = text
+                # If LLM gave a fuzzy place, store as hint instead.
+                text_val = str(val).strip()
+                if text_val and _looks_like_hint(text_val):
+                    info["destination_hint"] = text_val
                     info.pop("destination", None)
                     continue
-            info[key] = value
-        
-        # Check completeness
-        missing = result.get("missing", [])
-        has_required = all([
+            info[key] = val
+
+        missing = parsed.get("missing", []) or []
+        complete = all([
             info.get("origin"),
             info.get("departure_date") and info.get("return_date"),
             info.get("trip_purpose"),
-            info.get("travel_pack")
+            info.get("travel_pack"),
         ])
-        
-        if has_required and not missing:
-            # Build human-readable summary
+
+        # If complete, avoid re-asking if we've already confirmed this exact combo
+        if complete and not missing:
+            current_hash = _hash_required(info)
+            if clar.get("status") == "complete" and clar.get("confirmed_hash") == current_hash:
+                state.setdefault("ui_flags", {})["confirmed"] = True
+                return state
+
+            # Build one-line human summary and ask once
             parts = []
-            
-            if info.get('origin'):
-                parts.append(f"from {info['origin']}")
-            
-            if info.get('departure_date') and info.get('return_date'):
-                # Format dates nicely
-                dep = datetime.fromisoformat(info['departure_date']).strftime("%B %d")
-                ret = datetime.fromisoformat(info['return_date']).strftime("%B %d")
+            if info.get("origin"): parts.append(f"from {info['origin']}")
+            if info.get("departure_date") and info.get("return_date"):
+                dep = datetime.fromisoformat(info["departure_date"]).strftime("%B %d")
+                ret = datetime.fromisoformat(info["return_date"]).strftime("%B %d")
                 parts.append(f"{dep} to {ret}")
-            
-            if info.get('destination'):
+            if info.get("destination"):
                 parts.append(f"to {info['destination']}")
-            elif info.get('destination_hint'):
+            elif info.get("destination_hint"):
                 parts.append(f"near {info['destination_hint']}")
-            
-            if info.get('trip_purpose'):
-                parts.append(f"for {info['trip_purpose']}")
-            
-            if info.get('travel_pack'):
-                pack = info['travel_pack']
-                if pack != "solo":
-                    parts.append(f"with {pack}")
-            
-            summary = ", ".join(parts)
-            
-            # ALWAYS confirm before proceeding
-            confirmation = f"Let me confirm your trip: {summary}. Does this look correct?"
-            
+            if info.get("trip_purpose"): parts.append(f"for {info['trip_purpose']}")
+            if info.get("travel_pack") and info["travel_pack"] != "solo":
+                parts.append(f"with {info['travel_pack']}")
+            summary = ", ".join(parts) if parts else "your trip"
+
             tools["clarification"] = {
                 "status": "awaiting_confirmation",
-                "summary": summary
+                "summary": summary,
+                "confirmed_hash": current_hash,  # used to skip re-asking when unchanged
             }
-            add_message(state, AIMessage(content=confirmation))
+            add_message(state, AIMessage(content=f"Let me confirm your trip: {summary}. Does this look correct?"))
             return state
-        
-        # Ask for missing info
+
+        # If incomplete, ask for the top 1–2 missing items
         if missing:
-            state["clarification_attempts"] = attempts + 1
-            
-            # Show what we have
-            have_parts = []
-            if info.get('origin'):
-                have_parts.append(f"from {info['origin']}")
-            if info.get('departure_date'):
-                have_parts.append(f"on {info['departure_date']}")
-            if info.get('trip_purpose'):
-                have_parts.append(f"for {info['trip_purpose']}")
-            
-            field_labels = {
+            labels = {
                 "origin": "departure location",
-                "timing": "travel dates",
                 "departure_date": "departure date",
                 "return_date": "return date",
                 "trip_purpose": "what you'd like to do",
-                "travel_pack": "who's traveling"
+                "travel_pack": "who's traveling",
             }
-            
-            missing_friendly = [field_labels.get(f, f) for f in missing[:2]]
-            
-            if have_parts:
-                question = f"Thanks! I have {', '.join(have_parts)}. "
-            else:
-                question = "I'd love to help! "
-            
-            question += f"Could you share your {' and '.join(missing_friendly)}?"
-            
+            ask = [labels.get(missing[0], missing[0])]
+            if len(missing) > 1:
+                ask.append(labels.get(missing[1], missing[1]))
+            prefix_bits = []
+            if info.get("origin"): prefix_bits.append(f"from {info['origin']}")
+            if info.get("departure_date"): prefix_bits.append(f"on {info['departure_date']}")
+            if info.get("trip_purpose"): prefix_bits.append(f"for {info['trip_purpose']}")
+            prefix = f"Thanks! I have {', '.join(prefix_bits)}. " if prefix_bits else ""
+            add_message(state, AIMessage(content=prefix + f"Could you share your {' and '.join(ask)}?"))
             tools["clarification"] = {"status": "incomplete", "missing": missing}
-            add_message(state, AIMessage(content=question))
             return state
-            
-    except Exception as e:
-        print(f"[clarifier error] {e}")
-        state["clarification_attempts"] = attempts + 1
+
+    except Exception:
+        # Fall back to a simple ask if parsing fails
         tools["clarification"] = {"status": "incomplete"}
-        add_message(state, AIMessage(content="Could you tell me where you're traveling from, when, and what you'd like to do?"))
-    
+        add_message(state, AIMessage(content="Could you tell me where you're traveling from, your dates, and what you'd like to do?"))
+        return state
+
     return state

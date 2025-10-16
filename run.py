@@ -2,12 +2,14 @@ import os
 
 os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
 
+from core.logging_config import configure_logging
 from core.conversation_manager import initiate_conversation, handle_user_input, get_conversation_history
 from core.orchestrator import run_session
 from dotenv import load_dotenv
 
 def main():
     load_dotenv() # Load environment variables from .env
+    configure_logging()
     print("Hello. How are you doing?")
     print("My name is Cursor. I specialize in trip planning and would love to help you with anything.")
     print("Whom I have the pleasure talking to and what can I help with?")

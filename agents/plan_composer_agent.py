@@ -1,92 +1,122 @@
 # agents/plan_composer_agent.py
 """
-Plan Composer (prototype)
-- Reads: state["current_plan"], state["tool_results"] (travel/stays/activities)
-- Writes: one AIMessage with a concise, actionable summary + top links
-- Goal: reduce cognitive load (clear plan + handful of high-signal links)
+AI-driven Plan Composer (no fallback, no normalization helper)
+- Reads: state["current_plan"], state["tool_results"], state["extracted_info"]
+- Invokes an LLM to compose a concise, human-friendly plan message in markdown.
+- Must-haves kept:
+  * Read trip facts from current_plan["summary"] (fallback to extracted_info)
+  * Simple type guards on tool blocks
+  * Use destination hint from extracted_info when destination absent
+  * Single next-step question crafted by the LLM
 """
 
 from __future__ import annotations
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Tuple
+import logging
 from core.state import GraphState
 from core.conversation_manager import handle_ai_output
+from langchain_openai import ChatOpenAI
+
+logger = logging.getLogger(__name__)
 
 
-def _fmt_links(items: List[Dict[str, str]], limit: int = 3) -> List[str]:
-    """Return markdown bullets for top-N links."""
-    out: List[str] = []
-    for it in items[:limit]:
-        title = (it.get("title") or "Link").strip()
-        url = (it.get("url") or "").strip()
-        if url:
-            out.append(f" • [{title}]({url})")
-    return out
+def _gather_trip_facts(state: GraphState) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
+    """Collect trip facts and raw sections (travel/stays/activities) with minimal guarding."""
+    plan: Dict[str, Any] = state.get("current_plan", {}) or {}
+    tools: Dict[str, Any] = state.get("tool_results", {}) or {}
+    ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
+
+    plan_summary: Dict[str, Any] = plan.get("summary", {}) if isinstance(plan.get("summary"), dict) else {}
+
+    # Dates can be stored either flat or nested under "dates"
+    dates_block = plan_summary.get("dates") if isinstance(plan_summary.get("dates"), dict) else {}
+    dep = dates_block.get("departure") if dates_block else None
+    ret = dates_block.get("return") if dates_block else None
+    dur = dates_block.get("duration_days") if dates_block else None
+
+    facts = {
+        "origin": plan_summary.get("origin") or ex.get("origin") or "",
+        "destination": plan_summary.get("destination") or ex.get("destination") or "",
+        "destination_hint": ex.get("destination_hint") or "",
+        "duration_days": plan_summary.get("duration_days") or ex.get("duration_days") or dur or "",
+        "purpose": plan_summary.get("purpose") or ex.get("trip_purpose") or "",
+        "pack": plan_summary.get("pack") or ex.get("travel_pack") or "",
+        "dates": {
+            "departure": dep or ex.get("departure_date") or "",
+            "return": ret or ex.get("return_date") or "",
+        },
+    }
+
+    # Minimal guards: ensure dicts; keep results as-is but only pass list-of-dicts with a url
+    def _section(name: str) -> Dict[str, Any]:
+        blk = tools.get(name)
+        if not isinstance(blk, dict):
+            return {}
+        res = blk.get("results")
+        if isinstance(res, list):
+            res = [r for r in res if isinstance(r, dict) and (r.get("url") or "").strip()]
+            blk = {**blk, "results": res[:6]}  # light cap for prompt size
+        else:
+            blk = {**blk, "results": []}
+        return {
+            "summary": blk.get("summary") or "",
+            "results": blk.get("results") or [],
+            "follow_up": blk.get("follow_up") or "",
+        }
+
+    travel = _section("travel")
+    stays = _section("stays")
+    acts = _section("activities")
+
+    logger.debug(
+        "Composer gathered facts: destination=%s, travel_links=%d, stay_links=%d, activity_links=%d",
+        facts.get("destination") or facts.get("destination_hint"),
+        len(travel["results"]),
+        len(stays["results"]),
+        len(acts["results"]),
+    )
+
+    return facts, travel, stays, acts
 
 
 def compose_itinerary(state: GraphState) -> GraphState:
-    """
-    Compose one friendly message combining:
-    - Base plan summary (origin, destination, duration)
-    - Travel / Stays / Activities highlights
-    - A single, clear next-step question
-    """
-    plan: Dict[str, Any] = state.get("current_plan", {})
-    tools: Dict[str, Any] = state.get("tool_results", {})
+    """Use an LLM to compose the itinerary response (no deterministic fallback)."""
+    facts, travel, stays, acts = _gather_trip_facts(state)
 
-    # Core plan bits
-    summary = plan.get("summary", "Trip plan")
-    origin = plan.get("origin", "")
-    dest = plan.get("destination", "")
-    dest_hint = plan.get("destination_hint", "")
-    days = plan.get("duration_days", "")
-    plan_line_bits: List[str] = []
-    if origin: plan_line_bits.append(f"from **{origin}**")
-    if dest: plan_line_bits.append(f"to **{dest}**")
-    elif dest_hint: plan_line_bits.append(f"toward **{dest_hint}**")
-    if days: plan_line_bits.append(f"**{days} days**")
+    context = {
+        "trip": facts,
+        "sections": {
+            "travel": {"summary": travel["summary"], "links": travel["results"][:6]},
+            "stays":  {"summary": stays["summary"],  "links": stays["results"][:6], "follow_up": stays.get("follow_up", "")},
+            "activities": {"summary": acts["summary"], "links": acts["results"][:6]},
+        },
+    }
 
-    # Branch payloads
-    travel = tools.get("travel", {})        # {"summary", "results", "suggested_queries"}
-    stays = tools.get("stays", {})          # {"summary", "results", "follow_up"}
-    acts = tools.get("activities", {})      # {"summary", "results"}
+    system_prompt = (
+        "You are a concise, human-friendly AI travel planner. "
+        "Compose a short markdown reply with:\n"
+        "1) A **Plan** line (origin → destination, or destination hint if destination is missing, → duration).\n"
+        "2) Up to three sections: **Travel**, **Stays**, **Activities**. "
+        "For each, include one concise summary sentence and up to 3 bullet links using the provided links only.\n"
+        "3) End with a single next-step question tailored to the context (use stays.follow_up if present).\n"
+        "Rules: Keep it skimmable. Avoid fluff. Do not invent URLs. "
+        "If a section has no links, include only the summary line. Use destination hint when destination is missing."
+    )
 
-    # Build the reply
-    lines: List[str] = []
-    lines.append(f"**Plan**: {summary}")
-    if plan_line_bits:
-        lines.append(" • " + ", ".join(plan_line_bits))
+    user_prompt = (
+        "Compose using this JSON context. Use only fields provided. "
+        "Do not echo the JSON. Output markdown only.\n\n"
+        f"{context}"
+    )
 
-    # Travel
-    if travel:
-        lines.append("\n**Travel**")
-        tr_sum = travel.get("summary", "Transport research links (flights, drive time, transfers).")
-        lines.append(f" • {tr_sum}")
-        tr_links = _fmt_links(travel.get("results", []), limit=3)
-        if tr_links: lines.extend(tr_links)
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.3)
+    logger.debug("Composer invoking LLM to generate itinerary response.")
+    resp = llm.invoke([
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ])
+    content = (resp.content or "").strip()
+    logger.debug("Composer produced response with %d characters.", len(content))
 
-    # Stays
-    if stays:
-        lines.append("\n**Stays**")
-        st_sum = stays.get("summary", "Neighborhood/hotel research to get you started.")
-        lines.append(f" • {st_sum}")
-        st_links = _fmt_links(stays.get("results", []), limit=3)
-        if st_links: lines.extend(st_links)
-
-    # Activities
-    if acts:
-        lines.append("\n**Activities**")
-        ac_sum = acts.get("summary", f"Top activity links for {dest or 'your destination'}.")
-        lines.append(f" • {ac_sum}")
-        ac_links = _fmt_links(acts.get("results", []), limit=3)
-        if ac_links: lines.extend(ac_links)
-
-    # One clear next step (prefer stays' follow-up if present)
-    follow_up = stays.get("follow_up") if stays else None
-    if dest or dest_hint:
-        next_step = follow_up or "Shall I shortlist hotels, compare neighborhoods, or look up flight options?"
-    else:
-        next_step = "Want me to suggest destinations that fit your vibe?"
-    lines.append("\n" + next_step)
-
-    handle_ai_output(state, "\n".join(lines))
+    handle_ai_output(state, content)
     return state

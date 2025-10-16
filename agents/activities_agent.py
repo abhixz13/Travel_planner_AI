@@ -1,16 +1,22 @@
 # agents/activities_agent.py
 from __future__ import annotations
-import json, os, requests
+import json
+import os
+import re
+import logging
+import requests
 from typing import Any, Dict, List
+from core.conversation_manager import last_user_message
 from core.state import GraphState
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import BaseMessage, SystemMessage, ToolMessage, AIMessage
+from langchain_core.messages import SystemMessage, ToolMessage, AIMessage
 from langchain_core.tools import tool
 try:
     from langgraph.prebuilt import create_react_agent
 except ImportError:  # Older langgraph releases
     create_react_agent = None  # type: ignore
 
+logger = logging.getLogger(__name__)
 @tool
 def serp_activities(query: str) -> str:
     """Google (SerpAPI) search for activities at a destination; returns JSON list of {title,url,snippet}."""
@@ -64,6 +70,14 @@ _PROMPT = (
 
 _AGENT = None
 _FALLBACK_MODE = False
+_YES_NO_REPLIES = {"yes", "no", "yep", "nope", "ok", "okay"}
+
+
+def _is_brief_ack(message: str | None) -> bool:
+    if not message:
+        return False
+    cleaned = re.sub(r"[^\w\s]", "", message).strip().lower()
+    return cleaned in _YES_NO_REPLIES
 
 
 def _build_agent():
@@ -92,11 +106,15 @@ def _build_agent():
 def find_activities(state: GraphState) -> GraphState:
     ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
     if not ex.get("destination"):
-        print("DEBUG: No destination, skipping activities research")
+        logger.debug("Activities agent: destination missing; skipping research.")
         return state
 
     # Upstream guarantees destination exists
     dest = ex.get("destination", "").strip()
+
+    if _is_brief_ack(last_user_message(state)):
+        logger.debug("Activities agent: latest user turn is acknowledgement; skipping fetch.")
+        return state
 
     context = (
         "TRIP CONTEXT:\n"
@@ -110,6 +128,7 @@ def find_activities(state: GraphState) -> GraphState:
     try:
         agent = _build_agent()
     except RuntimeError:
+        logger.debug("Activities agent: OPENAI_API_KEY missing; recording failure message.")
         state.setdefault("tool_results", {})["activities"] = {
             "summary": "Cannot research activities: OPENAI_API_KEY is not set.",
             "suggested_queries": [],
@@ -117,13 +136,19 @@ def find_activities(state: GraphState) -> GraphState:
         }
         return state
 
-    prior: List[BaseMessage] = list(state.get("messages", []))
+    logger.debug(
+        "Activities agent invoking ReAct for destination=%s dates=%s→%s",
+        dest,
+        ex.get("departure_date", ""),
+        ex.get("return_date", ""),
+    )
     try:
         result = agent.invoke(
-            {"messages": prior + [SystemMessage(content=context)]},
+            {"messages": [SystemMessage(content=context)]},
             config={"tags": ["agent:activities"], "metadata": {"node": "fetch_activities"}}
         )
     except Exception as exc:
+        logger.exception("Activities agent invocation failed.")
         state.setdefault("tool_results", {})["activities"] = {
             "summary": "Activities research failed: " + str(exc).split("\n")[0],
             "suggested_queries": [],
@@ -131,7 +156,7 @@ def find_activities(state: GraphState) -> GraphState:
         }
         return state
 
-    messages: List[BaseMessage] = result.get("messages", []) if isinstance(result, dict) else []
+    messages = result.get("messages", []) if isinstance(result, dict) else []
     links: List[Dict[str, str]] = []
 
     for m in messages:
@@ -173,4 +198,5 @@ def find_activities(state: GraphState) -> GraphState:
         "suggested_queries": [],  # agent internalizes the queries
         "results": deduped,
     }
+    logger.debug("Activities agent stored %d activity links.", len(deduped))
     return state

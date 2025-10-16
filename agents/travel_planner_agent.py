@@ -1,42 +1,74 @@
 # agents/travel_planner_agent.py
 """
-Planner: builds a tiny base itinerary from extracted_info.
+Planner stub: builds a tiny base itinerary from extracted_info.
+
+Writes:
+state["current_plan"] = {
+  "summary": {origin, destination, dates{departure, return, duration_days}, purpose, pack},
+  "travel": None, "stays": None, "activities": None
+}
 """
 
 from __future__ import annotations
-from typing import Dict, Any, List
+from typing import Dict, Any
+import logging
+from datetime import datetime
 from core.state import GraphState
 
-def _days(ex: Dict[str, Any]) -> int:
-    try: return int(ex.get("duration_days") or 2)
-    except: return 2
+logger = logging.getLogger(__name__)
 
-def _outline(days: int, purpose: str) -> List[Dict[str, Any]]:
-    theme = (purpose or "").lower()
-    plan = []
-    for i in range(1, days+1):
-        if "adventure" in theme: t = "outdoor/adventure"
-        elif "relax" in theme or "chill" in theme: t = "relaxation"
-        elif "sight" in theme: t = "sightseeing"
-        else: t = "balanced"
-        plan.append({"day": i, "theme": t, "notes": []})
-    return plan
+
+def _duration_days(ex: Dict[str, Any]) -> int:
+    """Best-effort duration: prefer explicit duration_days; else compute from dates; else 2."""
+    # Explicit field wins if valid
+    try:
+        d = int(ex.get("duration_days")) if ex.get("duration_days") is not None else None
+        if d and d > 0:
+            return d
+    except Exception:
+        pass
+
+    # Try to compute from ISO dates
+    dep = (ex.get("departure_date") or "").strip()
+    ret = (ex.get("return_date") or "").strip()
+    try:
+        if dep and ret:
+            delta = (datetime.fromisoformat(ret) - datetime.fromisoformat(dep)).days
+            if delta > 0:
+                return delta
+    except Exception:
+        pass
+
+    # Fallback
+    return 2
+
 
 def create_itinerary(state: GraphState) -> GraphState:
-    """Write current_plan with summary + outline."""
-    ex: Dict[str, Any] = state.setdefault("extracted_info", {})
-    d = _days(ex)
-    state["current_plan"] = {
-        "summary": f"{d}-day {(ex.get('trip_purpose') or 'trip')} for {(ex.get('travel_pack') or 'traveler(s)')}",
-        "origin": ex.get("origin",""),
-        "destination": ex.get("destination",""),
-        "destination_hint": ex.get("destination_hint",""),
-        "start_date": ex.get("departure_date",""),
-        "end_date": ex.get("return_date",""),
-        "duration_days": d,
-        "trip_purpose": ex.get("trip_purpose",""),
-        "travel_pack": ex.get("travel_pack",""),
-        "constraints": ex.get("constraints",{}),
-        "daily_outline": _outline(d, ex.get("trip_purpose","")),
+    """Minimal planner: write summary + empty sections."""
+    ex: Dict[str, Any] = state.setdefault("extracted_info", {}) or {}
+
+    summary = {
+        "origin": ex.get("origin", "") or "",
+        "destination": ex.get("destination", "") or "",
+        "dates": {
+            "departure": ex.get("departure_date", "") or "",
+            "return": ex.get("return_date", "") or "",
+            "duration_days": _duration_days(ex),
+        },
+        "purpose": ex.get("trip_purpose", "") or "",
+        "pack": ex.get("travel_pack", "") or "",
     }
+
+    state["current_plan"] = {
+        "summary": summary,
+        "travel": None,
+        "stays": None,
+        "activities": None,
+    }
+    logger.debug(
+        "Planner seeded current_plan summary: origin=%s destination=%s duration=%s",
+        summary["origin"],
+        summary["destination"],
+        summary["dates"]["duration_days"],
+    )
     return state
