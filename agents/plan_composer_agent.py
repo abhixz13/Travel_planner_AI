@@ -1,7 +1,7 @@
 # agents/plan_composer_agent.py
 """
 AI-driven Plan Composer (no fallback, no normalization helper)
-- Reads: state["current_plan"], state["tool_results"], state["extracted_info"]
+- Reads: state["current_plan"], state["extracted_info"]
 - Invokes an LLM to compose a concise, human-friendly plan message in markdown.
 - Must-haves kept:
   * Read trip facts from current_plan["summary"] (fallback to extracted_info)
@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 def _gather_trip_facts(state: GraphState) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     """Collect trip facts and raw sections (travel/stays/activities) with minimal guarding."""
     plan: Dict[str, Any] = state.get("current_plan", {}) or {}
-    tools: Dict[str, Any] = state.get("tool_results", {}) or {}
     ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
 
     plan_summary: Dict[str, Any] = plan.get("summary", {}) if isinstance(plan.get("summary"), dict) else {}
@@ -47,26 +46,30 @@ def _gather_trip_facts(state: GraphState) -> Tuple[Dict[str, Any], Dict[str, Any
         },
     }
 
-    # Minimal guards: ensure dicts; keep results as-is but only pass list-of-dicts with a url
-    def _section(name: str) -> Dict[str, Any]:
-        blk = tools.get(name)
-        if not isinstance(blk, dict):
-            return {}
-        res = blk.get("results")
-        if isinstance(res, list):
-            res = [r for r in res if isinstance(r, dict) and (r.get("url") or "").strip()]
-            blk = {**blk, "results": res[:6]}  # light cap for prompt size
-        else:
-            blk = {**blk, "results": []}
-        return {
-            "summary": blk.get("summary") or "",
-            "results": blk.get("results") or [],
-            "follow_up": blk.get("follow_up") or "",
-        }
+    def _section_from_plan(name: str) -> Dict[str, Any]:
+        raw = plan.get(name)
+        block = raw if isinstance(raw, dict) else {}
+        summary = str(block.get("summary", "") or "").strip()
+        results_raw = block.get("results")
+        results: List[Dict[str, str]] = []
+        if isinstance(results_raw, list):
+            for item in results_raw:
+                if not isinstance(item, dict):
+                    continue
+                url = str(item.get("url", "") or "").strip()
+                if not url:
+                    continue
+                title = str(item.get("title", "") or "").strip() or "Link"
+                snippet = str(item.get("snippet", "") or "")
+                results.append({"title": title, "url": url, "snippet": snippet})
+                if len(results) >= 6:
+                    break
+        follow_up = str(block.get("follow_up", "") or "").strip()
+        return {"summary": summary, "results": results, "follow_up": follow_up}
 
-    travel = _section("travel")
-    stays = _section("stays")
-    acts = _section("activities")
+    travel = _section_from_plan("travel")
+    stays = _section_from_plan("stays")
+    acts = _section_from_plan("activities")
 
     logger.debug(
         "Composer gathered facts: destination=%s, travel_links=%d, stay_links=%d, activity_links=%d",
