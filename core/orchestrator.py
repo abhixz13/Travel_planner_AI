@@ -47,21 +47,31 @@ def _ensure_plan_initialized(state: GraphState) -> None:
         if val is None or isinstance(val, dict):
             plan[key] = val  # OK: None or dict
         else:
-            # Not part of the MUST-HAVES to coerce types, but the safest minimal fix
-            # is to reset unexpected types to None so guarded calls can proceed.
             plan[key] = None
             logger.debug("Reset plan section '%s' to None due to unexpected type.", key)
 
 
 def _should_merge(payload: Dict[str, Any]) -> bool:
-    """Return True if the payload satisfies merge requirements."""
+    """
+    Return True if the payload satisfies merge requirements.
+    Updated to handle both old structure (summary/results) and new structure (recommendations/sources).
+    """
     if not isinstance(payload, dict):
         return False
+    
+    # New structure: recommendations + sources
+    recommendations = payload.get("recommendations")
+    sources = payload.get("sources")
+    has_recommendations = isinstance(recommendations, str) and recommendations.strip() != ""
+    has_sources = isinstance(sources, list) and len(sources) > 0
+    
+    # Old structure: summary + results (for backwards compatibility)
     summary = payload.get("summary")
     results = payload.get("results")
     has_summary = isinstance(summary, str) and summary.strip() != ""
     has_results = isinstance(results, list) and len(results) > 0
-    return has_summary or has_results
+    
+    return (has_recommendations or has_sources) or (has_summary or has_results)
 
 
 # -----------------------------
@@ -146,8 +156,11 @@ def _run_research(state: GraphState) -> GraphState:
             )
             continue
 
+        # Run the agent
+        logger.info(f"Running {section} research agent...")
         patch = agent(state)
         merged = False
+        
         if isinstance(patch, dict) and section in patch:
             payload = patch[section]
             if _should_merge(payload):
@@ -155,6 +168,10 @@ def _run_research(state: GraphState) -> GraphState:
                 payload["_fp"] = current_fp
                 plan[section] = payload
                 merged = True
+                logger.info(f"✓ {section.capitalize()} research completed and merged")
+            else:
+                logger.warning(f"✗ {section.capitalize()} research returned insufficient data")
+        
         logger.debug(
             "Research gating: section=%s fp_prev=%s fp_curr=%s decision=run merged=%s",
             section,
@@ -221,7 +238,14 @@ APP = build_graph()
 
 def run_session(state: GraphState) -> GraphState:
     """Run one turn and return updated state (LangSmith tracing via env vars)."""
+    logger.info("=" * 60)
     logger.info("Starting run_session with %d messages.", len(state.get("messages", [])))
-    new_state = APP.invoke(state)
-    logger.info("Completed run_session; total messages now %d.", len(new_state.get("messages", [])))
-    return new_state
+    logger.info("=" * 60)
+    
+    try:
+        new_state = APP.invoke(state)
+        logger.info("✓ Completed run_session; total messages now %d.", len(new_state.get("messages", [])))
+        return new_state
+    except Exception as exc:
+        logger.exception("✗ Session failed with error:")
+        raise

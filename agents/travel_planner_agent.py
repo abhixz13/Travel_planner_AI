@@ -46,6 +46,7 @@ def _duration_days(ex: Dict[str, Any]) -> int:
 def create_itinerary(state: GraphState) -> GraphState:
     """Minimal planner: write summary + empty sections."""
     ex: Dict[str, Any] = state.setdefault("extracted_info", {}) or {}
+    plan: Dict[str, Any] = state.setdefault("current_plan", {}) or {}
 
     summary = {
         "origin": ex.get("origin", "") or "",
@@ -59,12 +60,10 @@ def create_itinerary(state: GraphState) -> GraphState:
         "pack": ex.get("travel_pack", "") or "",
     }
 
-    state["current_plan"] = {
-        "summary": summary,
-        "travel": None,
-        "stays": None,
-        "activities": None,
-    }
+    plan["summary"] = summary
+    plan.setdefault("travel", None)
+    plan.setdefault("stays", None)
+    plan.setdefault("activities", None)
     logger.debug(
         "Planner seeded current_plan summary: origin=%s destination=%s duration=%s",
         summary["origin"],

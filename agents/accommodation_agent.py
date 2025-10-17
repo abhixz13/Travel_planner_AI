@@ -15,8 +15,8 @@ from langchain_core.messages import SystemMessage, ToolMessage, AIMessage
 from langchain_core.tools import tool
 try:
     from langgraph.prebuilt import create_react_agent
-except ImportError:  # Older langgraph releases
-    create_react_agent = None  # type: ignore
+except ImportError:
+    create_react_agent = None
 
 logger = logging.getLogger(__name__)
 
@@ -78,32 +78,50 @@ def serp_stays(query: str) -> str:
     except Exception:
         return "[]"
 
+@tool
+def fetch_page_content(url: str) -> str:
+    """Fetch and return main text content from a URL (simplified extraction)."""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (compatible; TravelBot/1.0)'}
+        r = requests.get(url, headers=headers, timeout=10)
+        if not r.ok:
+            return ""
+        
+        # Simple text extraction - strip HTML tags
+        text = re.sub(r'<script[^>]*>.*?</script>', '', r.text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        
+        # Return first 3000 chars to avoid token limits
+        return text[:3000]
+    except Exception as exc:
+        logger.debug(f"Failed to fetch {url}: {exc}")
+        return ""
+
 # --------------------------- Agent (ReAct) -----------------------------------
 
 _PROMPT = (
-    "You are an accommodation-finder agent.\n"
-    "- Create 1–3 focused queries from the trip context (destination, dates, party, preferences).\n"
-    "- Prefer `tavily_stays` for curated neighborhood/hotel roundups; if thin or generic, also call `serp_stays` for breadth.\n"
-    "- Aggregate 3–8 useful, non-duplicated links.\n"
-    "- End with a brief 1–2 sentence summary for the user.\n"
-    "Always use the tools for links; do not invent URLs."
+    "You are an accommodation recommendation agent.\n"
+    "WORKFLOW:\n"
+    "1. Create 1-2 focused search queries based on trip context\n"
+    "2. Use tavily_stays or serp_stays to find relevant articles\n"
+    "3. Use fetch_page_content on the TOP 2-3 most relevant URLs to read actual content\n"
+    "4. Synthesize the content into 2-3 SPECIFIC hotel/area recommendations with details:\n"
+    "   - Name of property/area\n"
+    "   - Why it's good for this family (proximity to attractions, amenities, etc.)\n"
+    "   - Price range if available\n"
+    "   - Family-friendly features\n"
+    "5. End with your recommendations in clear prose, then list source URLs\n\n"
+    "CRITICAL: Actually READ the content using fetch_page_content - don't just list links!"
 )
 
 _AGENT = None
 _FALLBACK_MODE = False
 _ACK_REPLIES = {
-    "ok",
-    "okay",
-    "yes",
-    "yep",
-    "yeah",
-    "sure",
-    "sounds good",
-    "looks good",
-    "thanks",
-    "thank you",
+    "ok", "okay", "yes", "yep", "yeah", "sure", "sounds good", 
+    "looks good", "thanks", "thank you",
 }
-
 
 def _is_brief_ack(message: Optional[str]) -> bool:
     if not message:
@@ -111,7 +129,6 @@ def _is_brief_ack(message: Optional[str]) -> bool:
     cleaned = re.sub(r"[^a-zA-Z\s]", "", message).strip().lower()
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned in _ACK_REPLIES
-
 
 def _normalize_links(links: List[Dict[str, Any]], limit: int) -> List[Dict[str, str]]:
     seen = set()
@@ -130,14 +147,13 @@ def _normalize_links(links: List[Dict[str, Any]], limit: int) -> List[Dict[str, 
             break
     return normalized
 
-
 def _build_agent():
     global _AGENT, _FALLBACK_MODE
     if _AGENT is not None:
         return _AGENT
 
     if create_react_agent is None:
-        raise RuntimeError("LangGraph version lacks create_react_agent; please upgrade langgraph>=0.1.5")
+        raise RuntimeError("LangGraph version lacks create_react_agent")
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY not set")
 
@@ -145,12 +161,12 @@ def _build_agent():
     try:
         _AGENT = create_react_agent(
             llm,
-            tools=[tavily_stays, serp_stays],
+            tools=[tavily_stays, serp_stays, fetch_page_content],
             state_modifier=_PROMPT,
         )
         _FALLBACK_MODE = False
     except TypeError:
-        _AGENT = create_react_agent(llm, tools=[tavily_stays, serp_stays])
+        _AGENT = create_react_agent(llm, tools=[tavily_stays, serp_stays, fetch_page_content])
         _FALLBACK_MODE = True
     return _AGENT
 
@@ -177,10 +193,9 @@ def find_accommodation(state: GraphState) -> Optional[Dict[str, Any]]:
     except RuntimeError:
         logger.debug("Accommodation agent: OPENAI_API_KEY missing; returning failure patch.")
         payload = {
-            "summary": "Cannot research stays: OPENAI_API_KEY is not set.",
-            "results": [],
+            "recommendations": "Cannot research stays: OPENAI_API_KEY is not set.",
+            "sources": [],
         }
-        logger.debug("Accommodation agent collected %d links; returning patch.", 0)
         state.setdefault("tool_results", {})["stays"] = payload
         return {"stays": payload}
 
@@ -190,15 +205,12 @@ def find_accommodation(state: GraphState) -> Optional[Dict[str, Any]]:
         f"- destination: {dest}\n"
         f"- dates: {dep} → {ret}\n"
         f"- party: adults={ex.get('num_adults','')} kids={ex.get('kids_ages','')}\n"
-        f"- purpose/preferences: {ex.get('trip_purpose','')} | pack: {ex.get('travel_pack','')}\n"
-        "Use this context to form queries and call the tools. End with a brief summary."
+        f"- purpose: {ex.get('trip_purpose','')} | preferences: {ex.get('travel_pack','')}\n\n"
+        "Find and READ content from top sources, then provide SPECIFIC accommodation recommendations."
     )
-    logger.debug(
-        "Accommodation agent invoking ReAct for destination=%s dates=%s→%s",
-        dest,
-        dep,
-        ret,
-    )
+    
+    logger.debug("Accommodation agent invoking ReAct for %s", dest)
+    
     try:
         result = agent.invoke(
             {"messages": [SystemMessage(content=context)]},
@@ -207,53 +219,49 @@ def find_accommodation(state: GraphState) -> Optional[Dict[str, Any]]:
     except Exception as exc:
         logger.exception("Accommodation agent invocation failed.")
         payload = {
-            "summary": "Stay research failed: " + str(exc).split("\n")[0],
-            "results": [],
+            "recommendations": "Stay research failed: " + str(exc).split("\n")[0],
+            "sources": [],
         }
-        logger.debug("Accommodation agent collected %d links; returning patch.", 0)
         state.setdefault("tool_results", {})["stays"] = payload
         return {"stays": payload}
 
     if not isinstance(result, dict):
         payload = {
-            "summary": "Stays research completed, but returned no structured results this time. I can try again or refine the query.",
-            "results": [],
+            "recommendations": "Unable to generate recommendations at this time.",
+            "sources": [],
         }
-        logger.debug("Accommodation agent collected %d links; returning patch.", 0)
         state.setdefault("tool_results", {})["stays"] = payload
         return {"stays": payload}
 
-    messages = result.get("messages", []) if isinstance(result, dict) else []
+    messages = result.get("messages", [])
+    
+    # Collect source links
     collected: List[Dict[str, Any]] = []
-
     for m in messages:
-        if isinstance(m, ToolMessage):
+        if isinstance(m, ToolMessage) and m.name in ["tavily_stays", "serp_stays"]:
             try:
                 payload = json.loads(m.content or "[]")
+                if isinstance(payload, list):
+                    collected.extend([it for it in payload if isinstance(it, dict)])
             except Exception:
-                payload = []
-            if isinstance(payload, list):
-                collected.extend([it for it in payload if isinstance(it, dict)])
+                pass
 
-    summary = "Here are useful stay/area links."
+    # Get AI recommendations
+    recommendations = ""
     for m in reversed(messages):
         if isinstance(m, AIMessage):
             candidate = (m.content or "").strip()
-            if candidate:
-                summary = candidate
+            if candidate and len(candidate) > 100:  # Ensure substantial response
+                recommendations = candidate
                 break
 
-    results = _normalize_links(collected, limit=8)
+    sources = _normalize_links(collected, limit=6)
 
-    payload = {"summary": summary, "results": results}
-    logger.debug(
-        "Accommodation agent collected %d links; returning %s.",
-        len(results),
-        "patch" if results or summary else "None",
-    )
-
-    if not (summary.strip() or results):
-        return None
-
+    payload = {
+        "recommendations": recommendations or "Unable to generate specific recommendations.",
+        "sources": sources
+    }
+    
+    logger.debug("Accommodation agent completed with %d sources", len(sources))
     state.setdefault("tool_results", {})["stays"] = payload
     return {"stays": payload}

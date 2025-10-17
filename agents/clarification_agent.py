@@ -59,6 +59,20 @@ def _hash_required(info: Dict[str, Any]) -> str:
     return hashlib.sha1(_json.dumps(key, sort_keys=True).encode()).hexdigest()
 
 
+# Treat low-information strings (e.g., "null") as missing.
+_SENTINEL_STRINGS = {"", "null", "none", "n/a", "na", "unknown", "tbd", "unsure"}
+
+
+def _normalize_value(val: Any) -> Any:
+    """Coerce loose sentinels to None and trim whitespace."""
+    if isinstance(val, str):
+        cleaned = val.strip()
+        if cleaned.lower() in _SENTINEL_STRINGS:
+            return None
+        return cleaned
+    return val
+
+
 # --- main node ---------------------------------------------------------------
 
 def extract_travel_info(state: GraphState) -> GraphState:
@@ -214,8 +228,10 @@ def extract_travel_info(state: GraphState) -> GraphState:
             "origin", "destination", "departure_date", "return_date",
             "duration_days", "trip_purpose", "travel_pack", "constraints"
         ]:
-            val = parsed.get(key)
+            val = _normalize_value(parsed.get(key))
             if val in (None, "", {}, []):
+                if key in info:
+                    info.pop(key, None)
                 continue
             if key == "destination":
                 # If LLM gave a fuzzy place, store as hint instead.
@@ -226,7 +242,19 @@ def extract_travel_info(state: GraphState) -> GraphState:
                     continue
             info[key] = val
 
-        missing = parsed.get("missing", []) or []
+        missing_raw = parsed.get("missing", []) or []
+        missing: List[str] = []
+        for item in missing_raw:
+            text = str(item).strip()
+            if text and text.lower() not in _SENTINEL_STRINGS:
+                missing.append(text)
+
+        required_fields = ["origin", "departure_date", "return_date", "trip_purpose", "travel_pack"]
+        for field in required_fields:
+            if not _normalize_value(info.get(field)):
+                if field not in missing:
+                    missing.append(field)
+
         complete = all([
             info.get("origin"),
             info.get("departure_date") and info.get("return_date"),
@@ -262,6 +290,7 @@ def extract_travel_info(state: GraphState) -> GraphState:
                 "summary": summary,
                 "confirmed_hash": current_hash,  # used to skip re-asking when unchanged
             }
+            logger.info("Clarification seeking confirmation: %s", summary)
             add_message(state, AIMessage(content=f"Let me confirm your trip: {summary}. Does this look correct?"))
             return state
 
@@ -282,6 +311,7 @@ def extract_travel_info(state: GraphState) -> GraphState:
             if info.get("departure_date"): prefix_bits.append(f"on {info['departure_date']}")
             if info.get("trip_purpose"): prefix_bits.append(f"for {info['trip_purpose']}")
             prefix = f"Thanks! I have {', '.join(prefix_bits)}. " if prefix_bits else ""
+            logger.info("Clarification requesting details for: %s", " & ".join(ask))
             add_message(state, AIMessage(content=prefix + f"Could you share your {' and '.join(ask)}?"))
             tools["clarification"] = {"status": "incomplete", "missing": missing}
             return state

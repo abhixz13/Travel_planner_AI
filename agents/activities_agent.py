@@ -13,13 +13,14 @@ from langchain_core.messages import SystemMessage, ToolMessage, AIMessage
 from langchain_core.tools import tool
 try:
     from langgraph.prebuilt import create_react_agent
-except ImportError:  # Older langgraph releases
-    create_react_agent = None  # type: ignore
+except ImportError:
+    create_react_agent = None
 
 logger = logging.getLogger(__name__)
+
 @tool
 def serp_activities(query: str) -> str:
-    """Google (SerpAPI) search for activities at a destination; returns JSON list of {title,url,snippet}."""
+    """Google (SerpAPI) search for activities; returns JSON list of {title,url,snippet}."""
     api = os.getenv("SERPAPI_API_KEY")
     if not api: return "[]"
     try:
@@ -34,7 +35,11 @@ def serp_activities(query: str) -> str:
         for x in rows:
             url = (x.get("link") or "").strip()
             if url:
-                out.append({"title": x.get("title","") or "", "url": url, "snippet": x.get("snippet","") or ""})
+                out.append({
+                    "title": x.get("title","") or "", 
+                    "url": url, 
+                    "snippet": x.get("snippet","") or ""
+                })
             if len(out) >= 8: break
         return json.dumps(out)
     except Exception:
@@ -42,7 +47,7 @@ def serp_activities(query: str) -> str:
 
 @tool
 def tavily_activities(query: str) -> str:
-    """Tavily search for activity roundups/guides; returns JSON list of {title,url,snippet}."""
+    """Tavily search for activity guides; returns JSON list of {title,url,snippet}."""
     api = os.getenv("TAVILY_API_KEY")
     if not api: return "[]"
     try:
@@ -53,36 +58,54 @@ def tavily_activities(query: str) -> str:
         )
         data = r.json() if r.ok else {}
         rows = data.get("results", []) or []
-        out = [{"title": x.get("title","") or "", "url": (x.get("url") or "").strip(), "snippet": x.get("content","") or ""} 
-               for x in rows if (x.get("url") or "").strip()]
+        out = [{
+            "title": x.get("title","") or "", 
+            "url": (x.get("url") or "").strip(), 
+            "snippet": x.get("content","") or ""
+        } for x in rows if (x.get("url") or "").strip()]
         return json.dumps(out[:8])
     except Exception:
         return "[]"
 
+@tool
+def fetch_page_content(url: str) -> str:
+    """Fetch and return main text content from a URL."""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (compatible; TravelBot/1.0)'}
+        r = requests.get(url, headers=headers, timeout=10)
+        if not r.ok:
+            return ""
+        
+        text = re.sub(r'<script[^>]*>.*?</script>', '', r.text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text[:3000]
+    except Exception as exc:
+        logger.debug(f"Failed to fetch {url}: {exc}")
+        return ""
+
 _PROMPT = (
-    "You are an activities-finder agent.\n"
-    "- Create 1–3 focused queries from the trip context.\n"
-    "- Prefer `serp_activities` for breadth; if thin/generic, also call `tavily_activities`.\n"
-    "- Aggregate 5–8 strong, non-duplicated links.\n"
-    "- End with a brief 1–2 sentence summary for the user.\n"
-    "Always use the tools for links; do not invent URLs."
+    "You are an activities recommendation agent.\n"
+    "WORKFLOW:\n"
+    "1. Create 1-2 focused search queries for family/toddler activities\n"
+    "2. Use serp_activities or tavily_activities to find guides\n"
+    "3. Use fetch_page_content on TOP 2-3 URLs to read actual recommendations\n"
+    "4. Synthesize into 3-5 SPECIFIC activity recommendations:\n"
+    "   - Activity name and description\n"
+    "   - Why it's perfect for toddlers/families\n"
+    "   - Practical tips (duration, cost, best time)\n"
+    "   - Any age considerations\n"
+    "5. Provide recommendations in clear prose, then list sources\n\n"
+    "CRITICAL: READ content with fetch_page_content - don't just list links!"
 )
 
 _AGENT = None
 _FALLBACK_MODE = False
 _ACK_REPLIES = {
-    "ok",
-    "okay",
-    "yes",
-    "yep",
-    "yeah",
-    "sure",
-    "sounds good",
-    "looks good",
-    "thanks",
-    "thank you",
+    "ok", "okay", "yes", "yep", "yeah", "sure", "sounds good",
+    "looks good", "thanks", "thank you",
 }
-
 
 def _is_brief_ack(message: Optional[str]) -> bool:
     if not message:
@@ -90,7 +113,6 @@ def _is_brief_ack(message: Optional[str]) -> bool:
     cleaned = re.sub(r"[^a-zA-Z\s]", "", message).strip().lower()
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned in _ACK_REPLIES
-
 
 def _normalize_links(links: List[Dict[str, Any]], limit: int) -> List[Dict[str, str]]:
     seen = set()
@@ -109,14 +131,13 @@ def _normalize_links(links: List[Dict[str, Any]], limit: int) -> List[Dict[str, 
             break
     return normalized
 
-
 def _build_agent():
     global _AGENT, _FALLBACK_MODE
     if _AGENT is not None:
         return _AGENT
 
     if create_react_agent is None:
-        raise RuntimeError("LangGraph version lacks create_react_agent; please upgrade langgraph>=0.1.5")
+        raise RuntimeError("LangGraph version lacks create_react_agent")
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY not set")
 
@@ -124,12 +145,12 @@ def _build_agent():
     try:
         _AGENT = create_react_agent(
             llm,
-            tools=[serp_activities, tavily_activities],
+            tools=[serp_activities, tavily_activities, fetch_page_content],
             state_modifier=_PROMPT,
         )
         _FALLBACK_MODE = False
     except TypeError:
-        _AGENT = create_react_agent(llm, tools=[serp_activities, tavily_activities])
+        _AGENT = create_react_agent(llm, tools=[serp_activities, tavily_activities, fetch_page_content])
         _FALLBACK_MODE = True
     return _AGENT
 
@@ -151,28 +172,23 @@ def find_activities(state: GraphState) -> Optional[Dict[str, Any]]:
         f"- destination: {dest}\n"
         f"- purpose: {ex.get('trip_purpose','')}\n"
         f"- pack: {ex.get('travel_pack','')}\n"
-        f"- dates: {ex.get('departure_date','')} → {ex.get('return_date','')}\n"
-        "Use this context to form queries and call the tools. End with a brief summary."
+        f"- dates: {ex.get('departure_date','')} → {ex.get('return_date','')}\n\n"
+        "Find and READ content, then provide SPECIFIC activity recommendations."
     )
 
     try:
         agent = _build_agent()
     except RuntimeError:
-        logger.debug("Activities agent: OPENAI_API_KEY missing; returning failure patch.")
+        logger.debug("Activities agent: OPENAI_API_KEY missing")
         payload = {
-            "summary": "Cannot research activities: OPENAI_API_KEY is not set.",
-            "results": [],
+            "recommendations": "Cannot research activities: OPENAI_API_KEY is not set.",
+            "sources": [],
         }
-        logger.debug("Activities agent collected %d links; returning patch.", 0)
         state.setdefault("tool_results", {})["activities"] = payload
         return {"activities": payload}
 
-    logger.debug(
-        "Activities agent invoking ReAct for destination=%s dates=%s→%s",
-        dest,
-        ex.get("departure_date", ""),
-        ex.get("return_date", ""),
-    )
+    logger.debug("Activities agent invoking ReAct for %s", dest)
+    
     try:
         result = agent.invoke(
             {"messages": [SystemMessage(content=context)]},
@@ -181,44 +197,41 @@ def find_activities(state: GraphState) -> Optional[Dict[str, Any]]:
     except Exception as exc:
         logger.exception("Activities agent invocation failed.")
         payload = {
-            "summary": "Activities research failed: " + str(exc).split("\n")[0],
-            "results": [],
+            "recommendations": "Activities research failed: " + str(exc).split("\n")[0],
+            "sources": [],
         }
-        logger.debug("Activities agent collected %d links; returning patch.", 0)
         state.setdefault("tool_results", {})["activities"] = payload
         return {"activities": payload}
 
     messages = result.get("messages", []) if isinstance(result, dict) else []
+    
+    # Collect sources
     collected: List[Dict[str, Any]] = []
-
     for m in messages:
-        if isinstance(m, ToolMessage):
+        if isinstance(m, ToolMessage) and m.name in ["serp_activities", "tavily_activities"]:
             try:
                 payload = json.loads(m.content or "[]")
+                if isinstance(payload, list):
+                    collected.extend([it for it in payload if isinstance(it, dict)])
             except Exception:
-                payload = []
-            if isinstance(payload, list):
-                collected.extend([it for it in payload if isinstance(it, dict)])
+                pass
 
-    summary = "Here are top activity links."
+    # Get recommendations
+    recommendations = ""
     for m in reversed(messages):
         if isinstance(m, AIMessage):
             candidate = (m.content or "").strip()
-            if candidate:
-                summary = candidate
+            if candidate and len(candidate) > 100:
+                recommendations = candidate
                 break
 
-    results = _normalize_links(collected, limit=8)
+    sources = _normalize_links(collected, limit=6)
 
-    payload = {"summary": summary, "results": results}
-    logger.debug(
-        "Activities agent collected %d links; returning %s.",
-        len(results),
-        "patch" if results or summary else "None",
-    )
-
-    if not (summary.strip() or results):
-        return None
-
+    payload = {
+        "recommendations": recommendations or "Unable to generate specific recommendations.",
+        "sources": sources
+    }
+    
+    logger.debug("Activities agent completed with %d sources", len(sources))
     state.setdefault("tool_results", {})["activities"] = payload
     return {"activities": payload}

@@ -15,13 +15,12 @@ from langchain_core.messages import SystemMessage, ToolMessage, AIMessage
 from langchain_core.tools import tool
 try:
     from langgraph.prebuilt import create_react_agent
-except ImportError:  # Older langgraph releases
-    create_react_agent = None  # type: ignore
-
-# ----------------------------- Tools ------------------------------------------
+except ImportError:
+    create_react_agent = None
 
 logger = logging.getLogger(__name__)
 
+# ----------------------------- Tools ------------------------------------------
 
 @tool
 def tavily_travel(query: str) -> str:
@@ -79,32 +78,48 @@ def serp_travel(query: str) -> str:
     except Exception:
         return "[]"
 
+@tool
+def fetch_page_content(url: str) -> str:
+    """Fetch and return main text content from a URL."""
+    try:
+        headers = {'User-Agent': 'Mozilla/5.0 (compatible; TravelBot/1.0)'}
+        r = requests.get(url, headers=headers, timeout=10)
+        if not r.ok:
+            return ""
+        
+        text = re.sub(r'<script[^>]*>.*?</script>', '', r.text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+        text = re.sub(r'<[^>]+>', ' ', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text[:3000]
+    except Exception as exc:
+        logger.debug(f"Failed to fetch {url}: {exc}")
+        return ""
+
 # --------------------------- Agent (ReAct) -----------------------------------
 
 _PROMPT = (
-    "You are a travel-options agent.\n"
-    "- Create 1–3 focused queries from the trip context to research: flights, driving time/route, nearby airports, and transfers.\n"
-    "- Prefer `tavily_travel` for curated roundups/how-tos; if thin or generic, also call `serp_travel` for breadth.\n"
-    "- Aggregate up to 12 useful, non-duplicated links.\n"
-    "- End with a brief 1–2 sentence user-facing summary.\n"
-    "Always use the tools for links; do not invent URLs."
+    "You are a travel logistics expert.\n"
+    "WORKFLOW:\n"
+    "1. Create 1-2 focused queries for transport research (flights, driving, airports)\n"
+    "2. Use tavily_travel or serp_travel to find information\n"
+    "3. Use fetch_page_content on TOP 2-3 URLs to get detailed info\n"
+    "4. Synthesize into actionable travel advice:\n"
+    "   - Best transport method (drive vs fly) with reasoning\n"
+    "   - If driving: distance, time, route highlights\n"
+    "   - If flying: recommended airports, typical flight duration, airlines\n"
+    "   - Cost estimates if available\n"
+    "   - Practical tips (booking windows, traffic times, etc.)\n"
+    "5. Provide clear recommendations in prose, then list sources\n\n"
+    "CRITICAL: READ content with fetch_page_content to give informed advice!"
 )
 
 _AGENT = None
 _FALLBACK_MODE = False
 _ACK_REPLIES = {
-    "ok",
-    "okay",
-    "yes",
-    "yep",
-    "yeah",
-    "sure",
-    "sounds good",
-    "looks good",
-    "thanks",
-    "thank you",
+    "ok", "okay", "yes", "yep", "yeah", "sure", "sounds good",
+    "looks good", "thanks", "thank you",
 }
-
 
 def _is_brief_ack(message: Optional[str]) -> bool:
     if not message:
@@ -112,7 +127,6 @@ def _is_brief_ack(message: Optional[str]) -> bool:
     cleaned = re.sub(r"[^a-zA-Z\s]", "", message).strip().lower()
     cleaned = re.sub(r"\s+", " ", cleaned)
     return cleaned in _ACK_REPLIES
-
 
 def _normalize_links(links: List[Dict[str, Any]], limit: int) -> List[Dict[str, str]]:
     seen = set()
@@ -124,13 +138,11 @@ def _normalize_links(links: List[Dict[str, Any]], limit: int) -> List[Dict[str, 
         if not url or url in seen:
             continue
         title = str(entry.get("title", "") or "").strip() or "Link"
-        snippet = str(entry.get("snippet", "") or "")
-        normalized.append({"title": title, "url": url, "snippet": snippet})
+        normalized.append({"title": title, "url": url})
         seen.add(url)
         if len(normalized) >= limit:
             break
     return normalized
-
 
 def _build_agent():
     global _AGENT, _FALLBACK_MODE
@@ -138,7 +150,7 @@ def _build_agent():
         return _AGENT
 
     if create_react_agent is None:
-        raise RuntimeError("LangGraph version lacks create_react_agent; please upgrade langgraph>=0.1.5")
+        raise RuntimeError("LangGraph version lacks create_react_agent")
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY not set")
 
@@ -146,19 +158,19 @@ def _build_agent():
     try:
         _AGENT = create_react_agent(
             llm,
-            tools=[tavily_travel, serp_travel],
+            tools=[tavily_travel, serp_travel, fetch_page_content],
             state_modifier=_PROMPT,
         )
         _FALLBACK_MODE = False
     except TypeError:
-        _AGENT = create_react_agent(llm, tools=[tavily_travel, serp_travel])
+        _AGENT = create_react_agent(llm, tools=[tavily_travel, serp_travel, fetch_page_content])
         _FALLBACK_MODE = True
     return _AGENT
 
 # ------------------------------ Node -----------------------------------------
 
 def find_travel_options(state: GraphState) -> Optional[Dict[str, Any]]:
-    """Gather transport research (flights, drive time, airports, transfers)."""
+    """Gather transport research and recommendations."""
 
     ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
     logger.debug("Travel agent input keys: %s", sorted(ex.keys()))
@@ -182,12 +194,11 @@ def find_travel_options(state: GraphState) -> Optional[Dict[str, Any]]:
     try:
         agent = _build_agent()
     except RuntimeError:
-        logger.debug("Travel agent: OPENAI_API_KEY missing; returning failure patch.")
+        logger.debug("Travel agent: OPENAI_API_KEY missing")
         payload = {
-            "summary": "Cannot research travel options: OPENAI_API_KEY is not set.",
-            "results": [],
+            "recommendations": "Cannot research travel options: OPENAI_API_KEY is not set.",
+            "sources": [],
         }
-        logger.debug("Travel agent collected %d links; returning patch.", 0)
         state.setdefault("tool_results", {})["travel"] = payload
         return {"travel": payload}
 
@@ -196,15 +207,11 @@ def find_travel_options(state: GraphState) -> Optional[Dict[str, Any]]:
         f"- origin: {origin}\n"
         f"- destination: {dest}\n"
         f"- when: {when}\n"
-        "Research flights, driving time/routes, nearby airports, and transfer options. "
-        "Form 1–3 concise queries and call the tools. End with a brief summary."
+        f"- purpose: {ex.get('trip_purpose', '')}\n\n"
+        "Research transport options, READ content from sources, and provide actionable travel advice."
     )
-    logger.debug(
-        "Travel agent invoking ReAct with origin=%s destination=%s when=%s",
-        origin,
-        dest,
-        when,
-    )
+    
+    logger.debug("Travel agent invoking ReAct: %s → %s", origin, dest)
 
     try:
         result = agent.invoke(
@@ -214,40 +221,41 @@ def find_travel_options(state: GraphState) -> Optional[Dict[str, Any]]:
     except Exception as exc:
         logger.exception("Travel agent invocation failed.")
         payload = {
-            "summary": "Travel research failed: " + str(exc).split("\n")[0],
-            "results": [],
+            "recommendations": "Travel research failed: " + str(exc).split("\n")[0],
+            "sources": [],
         }
-        logger.debug("Travel agent collected %d links; returning patch.", 0)
         state.setdefault("tool_results", {})["travel"] = payload
         return {"travel": payload}
 
     messages = result.get("messages", []) if isinstance(result, dict) else []
+    
+    # Collect sources
     collected: List[Dict[str, Any]] = []
-
     for m in messages:
-        if isinstance(m, ToolMessage):
+        if isinstance(m, ToolMessage) and m.name in ["tavily_travel", "serp_travel"]:
             try:
                 payload = json.loads(m.content or "[]")
+                if isinstance(payload, list):
+                    collected.extend([it for it in payload if isinstance(it, dict)])
             except Exception:
-                payload = []
-            if isinstance(payload, list):
-                collected.extend([it for it in payload if isinstance(it, dict)])
+                pass
 
-    summary = "Transport research links (flights, drive time, transfers)."
+    # Get recommendations
+    recommendations = ""
     for m in reversed(messages):
         if isinstance(m, AIMessage):
             candidate = (m.content or "").strip()
-            if candidate:
-                summary = candidate
+            if candidate and len(candidate) > 100:
+                recommendations = candidate
                 break
 
-    results = _normalize_links(collected, limit=12)
+    sources = _normalize_links(collected, limit=6)
 
-    payload = {"summary": summary, "results": results}
-    logger.debug("Travel agent collected %d links; returning %s.", len(results), "patch" if results or summary else "None")
-
-    if not (summary.strip() or results):
-        return None
-
+    payload = {
+        "recommendations": recommendations or "Unable to generate specific recommendations.",
+        "sources": sources
+    }
+    
+    logger.debug("Travel agent completed with %d sources", len(sources))
     state.setdefault("tool_results", {})["travel"] = payload
     return {"travel": payload}
