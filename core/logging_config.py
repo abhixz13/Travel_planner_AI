@@ -30,11 +30,16 @@ def configure_logging() -> None:
     """Configure root logging only once."""
     root_logger = logging.getLogger()
     if root_logger.handlers:
-        return
+        for handler in list(root_logger.handlers):
+            root_logger.removeHandler(handler)
 
-    level_name = os.getenv("TRAVEL_PLANNER_LOG_LEVEL", "INFO")
-    logging.basicConfig(level=_resolve_level(level_name), format=DEFAULT_FORMAT)
+    level_name = os.getenv("TRAVEL_PLANNER_LOG_LEVEL")
+    if level_name:
+        logging.disable(logging.NOTSET)
+        logging.basicConfig(level=_resolve_level(level_name), format=DEFAULT_FORMAT)
+    else:
+        logging.basicConfig(level=logging.CRITICAL, format=DEFAULT_FORMAT)
+        logging.disable(logging.CRITICAL)
 
-    # Quiet noisy third-party loggers unless explicitly raised via env vars.
     for name in NOISY_LOGGERS:
-        logging.getLogger(name).setLevel(logging.WARNING)
+        logging.getLogger(name).setLevel(logging.CRITICAL)

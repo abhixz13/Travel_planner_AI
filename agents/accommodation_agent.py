@@ -80,21 +80,20 @@ def serp_stays(query: str) -> str:
 
 @tool
 def fetch_page_content(url: str) -> str:
-    """Fetch and return main text content from a URL (simplified extraction)."""
+    """Fetch and return main text content from a URL."""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (compatible; TravelBot/1.0)'}
-        r = requests.get(url, headers=headers, timeout=10)
+        r = requests.get(url, headers=headers, timeout=15)  # Increased timeout
         if not r.ok:
             return ""
         
-        # Simple text extraction - strip HTML tags
         text = re.sub(r'<script[^>]*>.*?</script>', '', r.text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'<[^>]+>', ' ', text)
         text = re.sub(r'\s+', ' ', text).strip()
         
-        # Return first 3000 chars to avoid token limits
-        return text[:3000]
+        # CHANGE THIS: Increase from 3000 to 5000 for more context
+        return text[:5000]  # Was 3000, now 5000
     except Exception as exc:
         logger.debug(f"Failed to fetch {url}: {exc}")
         return ""
@@ -157,7 +156,11 @@ def _build_agent():
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY not set")
 
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.2,
+    max_tokens=2048  # Ensure detailed responses
+    )
     try:
         _AGENT = create_react_agent(
             llm,
@@ -206,7 +209,11 @@ def find_accommodation(state: GraphState) -> Optional[Dict[str, Any]]:
         f"- dates: {dep} → {ret}\n"
         f"- party: adults={ex.get('num_adults','')} kids={ex.get('kids_ages','')}\n"
         f"- purpose: {ex.get('trip_purpose','')} | preferences: {ex.get('travel_pack','')}\n\n"
-        "Find and READ content from top sources, then provide SPECIFIC accommodation recommendations."
+        "MANDATORY: Use fetch_page_content on AT LEAST 4 URLs (preferably 5-6).\n"
+        "Focus on: hotels.com, booking.com, tripadvisor, local hotel sites.\n"
+        "Extract REAL PRICES and SPECIFIC amenities from the content.\n"
+        "Your recommendations must include exact prices or 'call for rates'.\n"
+        "Each hotel description must be 4-6 sentences explaining WHY it's perfect."
     )
     
     logger.debug("Accommodation agent invoking ReAct for %s", dest)

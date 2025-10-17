@@ -136,13 +136,28 @@ def compose_itinerary(state: GraphState) -> GraphState:
 
     import json
     user_prompt = (
-        "Create a complete day-by-day itinerary using this research.\n"
-        "Make specific recommendations - don't just list options.\n"
-        "The family is looking for a plan they can follow.\n\n"
-        f"{json.dumps(context, indent=2)}"
+        "Create an ULTRA-DETAILED, COMPREHENSIVE day-by-day itinerary.\n\n"
+        "MINIMUM REQUIREMENTS:\n"
+        "- 2000+ words total\n"
+        "- 3-4 hotel recommendations with prices and 4-5 sentences each\n"
+        "- Hour-by-hour schedule for EACH day with specific times\n"
+        "- 6-8 activities with full details (name, cost, duration, tips)\n"
+        "- 10+ pro tips organized by category\n"
+        "- Specific restaurant names with why they're toddler-friendly\n\n"
+        "USE THE RESEARCH DATA BELOW - extract specific prices, names, and details:\n\n"
+        f"{json.dumps(context, indent=2)}\n\n"
+        "DO NOT use generic phrases like 'check website' or 'various options'.\n"
+        "BE SPECIFIC: Use exact names, prices, times, and locations from the research.\n"
+        "EXPLAIN WHY: Every recommendation needs reasoning specific to this family.\n"
+        "THINK TODDLER: All tips should be for families with toddlers (ages 1-3), not general families."
     )
 
-    llm = ChatOpenAI(model="gpt-4o", temperature=0.4)  # Use GPT-4 for better itinerary generation
+    llm = ChatOpenAI(
+        model="gpt-4o",
+        temperature=0.5,  # Slightly more creative
+        max_tokens=4096,  # Allow longer responses (was default ~2000)
+        request_timeout=60  # Give it time to think
+    )  # Use GPT-4 for better itinerary generation
     logger.debug("Composer invoking LLM to generate complete itinerary.")
     
     try:
@@ -150,11 +165,13 @@ def compose_itinerary(state: GraphState) -> GraphState:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ])
+        
         content = (resp.content or "").strip()
-        logger.debug("Composer produced itinerary with %d characters.", len(content))
+        word_count = len(content.split())
+        logger.debug("Composer produced itinerary with %d characters, %d words.", len(content), word_count)
 
         # Ensure we have substantial content
-        if len(content) < 500:
+        if len(content) < 2000:
             logger.warning("Generated itinerary seems too short, using fallback.")
             content = _generate_fallback_itinerary(facts, travel, stays, acts)
 

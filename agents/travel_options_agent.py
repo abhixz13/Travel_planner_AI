@@ -83,7 +83,7 @@ def fetch_page_content(url: str) -> str:
     """Fetch and return main text content from a URL."""
     try:
         headers = {'User-Agent': 'Mozilla/5.0 (compatible; TravelBot/1.0)'}
-        r = requests.get(url, headers=headers, timeout=10)
+        r = requests.get(url, headers=headers, timeout=15)  # Increased timeout
         if not r.ok:
             return ""
         
@@ -91,7 +91,9 @@ def fetch_page_content(url: str) -> str:
         text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
         text = re.sub(r'<[^>]+>', ' ', text)
         text = re.sub(r'\s+', ' ', text).strip()
-        return text[:3000]
+        
+        # CHANGE THIS: Increase from 3000 to 5000 for more context
+        return text[:5000]  # Was 3000, now 5000
     except Exception as exc:
         logger.debug(f"Failed to fetch {url}: {exc}")
         return ""
@@ -154,7 +156,11 @@ def _build_agent():
     if not os.getenv("OPENAI_API_KEY"):
         raise RuntimeError("OPENAI_API_KEY not set")
 
-    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0.2)
+    llm = ChatOpenAI(
+        model="gpt-4o-mini",
+        temperature=0.2,
+        max_tokens=2048  # Ensure detailed responses
+    )
     try:
         _AGENT = create_react_agent(
             llm,
@@ -208,7 +214,11 @@ def find_travel_options(state: GraphState) -> Optional[Dict[str, Any]]:
         f"- destination: {dest}\n"
         f"- when: {when}\n"
         f"- purpose: {ex.get('trip_purpose', '')}\n\n"
-        "Research transport options, READ content from sources, and provide actionable travel advice."
+        "MANDATORY: Use fetch_page_content on AT LEAST 4 URLs.\n"
+        "Find EXACT drive times, distances, routes from Google Maps or similar.\n"
+        "If flying is an option, research REAL flight prices and airports.\n"
+        "Make a CLEAR recommendation (drive vs fly) with 3-4 specific reasons.\n"
+        "Include toddler-specific travel tips (rest stops, timing, entertainment)."
     )
     
     logger.debug("Travel agent invoking ReAct: %s → %s", origin, dest)
