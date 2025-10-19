@@ -13,11 +13,27 @@ from core.state import GraphState
 logger = logging.getLogger(__name__)
 
 # Possible next steps in routing
-Route = Literal["ask_more", "discover", "plan"]
+Route = Literal["ask_more", "discover", "plan", "refine"]
 
 
 def route_after_extract(state: GraphState) -> Route:
     """Determine what to do next based on current state."""
+
+    # Check if itinerary already exists and user wants to refine it
+    itinerary_components = state.get("itinerary_components", {})
+    ui_flags = state.get("ui_flags", {})
+
+    # If itinerary was generated and user has sent a new message
+    if itinerary_components.get("days") and ui_flags.get("itinerary_presented"):
+        from agents.refinement_agent import detect_refinement_intent
+        from core.conversation_manager import last_user_message
+
+        user_msg = last_user_message(state)
+        intent = detect_refinement_intent(user_msg) if user_msg else None
+
+        if intent:
+            logger.info("Routing after extract → refine (refinement intent detected).")
+            return "refine"
 
     tools = state.get("tool_results") or {}
     clarification = tools.get("clarification") or {}

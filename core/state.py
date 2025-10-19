@@ -9,6 +9,10 @@ class GraphState(TypedDict, total=False):
     extracted_info: Dict[str, Any]
     current_plan: Dict[str, Any]
     tool_results: Dict[str, Any]
+    
+    # ===== Phase 1 Additions =====
+    itinerary_components: Dict[str, Any]  # Module 1.1: Component registry
+    conversation_context: Dict[str, Any]  # Module 1.2: Context tracking
 
 def new_state(
     *, messages: Optional[List[BaseMessage]] = None,
@@ -21,6 +25,22 @@ def new_state(
         "extracted_info": dict(extracted_info or {}),
         "current_plan": {},
         "tool_results": {},
+        "itinerary_components": {
+            "metadata": {},
+            "accommodation": None,
+            "transport": None,
+            "days": {}
+        },
+        "conversation_context": {
+            "current_topic": None,
+            "current_component_id": None,
+            "last_modification": None,
+            "pending_decision": None,
+            "recent_components": [],
+            "conversation_stage": "initial",
+            "last_user_intent": None,
+            "disambiguation_needed": False
+        }
     }
 
 def add_message(state: GraphState, msg: BaseMessage) -> GraphState:

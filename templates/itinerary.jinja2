@@ -1,0 +1,187 @@
+# 🗺️ Your {{ metadata.destination }} Adventure
+
+Great news! I've created a complete {{ metadata.duration_days }}-day itinerary for your {{ metadata.travel_pack }} trip. Let's explore what awaits you!
+
+## 📍 Trip Overview
+
+- **From**: {{ metadata.origin }}
+- **To**: {{ metadata.destination }}
+- **Dates**: {{ metadata.departure_date }} to {{ metadata.return_date }} ({{ metadata.duration_days }} days)
+- **Travel party**: {{ metadata.travel_pack | title }}
+- **Purpose**: {{ metadata.purpose }}
+
+---
+
+## 🚗 Getting There
+
+{% if transport_options | length > 1 %}
+I've compared multiple options for you. Here's what I found:
+
+{% for option in transport_options %}
+{% if option.recommended %}
+### ✅ **{{ option.mode | title }}** (Recommended)
+{% else %}
+### {{ option.mode | title }}
+{% endif %}
+
+**Duration**: {% if option.duration_minutes %}{{ (option.duration_minutes / 60) | round(1) }} hours{% else %}time varies{% endif %}
+
+{% if option.total_cost_estimate %}
+**Total Cost**: ~${{ option.total_cost_estimate }} {{ option.cost_notes }}
+{% elif option.cost_per_person %}
+**Cost**: ~${{ option.cost_per_person }}/person {{ option.cost_notes }}
+{% endif %}
+
+{{ option.description }}
+
+{% if option.pros_cons %}
+**Pros & Cons**: {{ option.pros_cons }}
+{% endif %}
+
+{% if option.recommendations %}
+**Tips:**
+{% for tip in option.recommendations %}
+- {{ tip }}
+{% endfor %}
+{% endif %}
+
+{% endfor %}
+
+{% else %}
+**{{ transport_options[0].mode | title }}** — Estimated {% if transport_options[0].duration_minutes %}{{ (transport_options[0].duration_minutes / 60) | round(1) }} hours{% else %}time varies{% endif %}
+
+{% if transport_options[0].total_cost_estimate %}
+**Total Cost**: ~${{ transport_options[0].total_cost_estimate }} {{ transport_options[0].cost_notes }}
+{% elif transport_options[0].cost_per_person %}
+**Cost**: ~${{ transport_options[0].cost_per_person }}/person {{ transport_options[0].cost_notes }}
+{% endif %}
+
+{{ transport_options[0].description }}
+
+{% if transport_options[0].recommendations %}
+**Travel Tips:**
+{% for tip in transport_options[0].recommendations %}
+- {{ tip }}
+{% endfor %}
+{% endif %}
+
+{% endif %}
+
+---
+
+## 🏨 Where to Stay
+
+Choose from these **3 excellent options** (tell me which you prefer!):
+
+{% for hotel in accommodation_options %}
+### {{ loop.index }}. {{ hotel.name }} — ${{ hotel.price_per_night }}/night
+
+{{ hotel.description }}
+
+**Location**: {{ hotel.location }}
+
+**Features**:
+{% for feature in hotel.features %}
+- {{ feature }}
+{% endfor %}
+{% if hotel.booking_url %}
+
+[Check availability]({{ hotel.booking_url }})
+{% endif %}
+
+{% endfor %}
+
+---
+
+## 📅 Day-by-Day Itinerary
+
+{% for day in days %}
+### Day {{ day.day_number }} — {{ day.theme }}
+
+**Morning ({{ day.morning.time_range }})**
+{% if day.morning.activity %}
+- **{{ day.morning.activity.time_start }}**: {{ day.morning.activity.name }}
+  - **Type**: {{ day.morning.activity.type | title }}
+  - **Duration**: {{ day.morning.activity.duration_minutes }} minutes
+  {% if day.morning.activity.cost_adult or day.morning.activity.cost_child %}
+  - **Cost**: {% if day.morning.activity.cost_adult %}Adults ${{ day.morning.activity.cost_adult }}{% endif %}{% if day.morning.activity.cost_child %}, Children ${{ day.morning.activity.cost_child }}{% endif %}{% if day.morning.activity.free_under_3 %}, Free under 3{% endif %}
+  {% endif %}
+  - {{ day.morning.activity.description }}
+  {% if day.morning.activity.tips %}
+  - **Tips**: {{ day.morning.activity.tips | join('; ') }}
+  {% endif %}
+{% elif day.morning.restaurant %}
+- **{{ day.morning.restaurant.time }}**: {{ day.morning.restaurant.meal_type | title }} at **{{ day.morning.restaurant.name }}**
+  - **Cuisine**: {{ day.morning.restaurant.cuisine }}
+  - **Price**: {{ day.morning.restaurant.price_range }}
+  {% if day.morning.restaurant.average_cost_per_person %}
+  - **Average**: ~${{ day.morning.restaurant.average_cost_per_person }}/person
+  {% endif %}
+  - {{ day.morning.restaurant.description }}
+  - **Toddler-friendly**: {{ day.morning.restaurant.toddler_friendly_features | join(', ') }}
+{% endif %}
+
+**Afternoon ({{ day.afternoon.time_range }})**
+{% if day.afternoon.activity %}
+- **{{ day.afternoon.activity.time_start }}**: {{ day.afternoon.activity.name }}
+  - **Type**: {{ day.afternoon.activity.type | title }}
+  - **Duration**: {{ day.afternoon.activity.duration_minutes }} minutes
+  {% if day.afternoon.activity.cost_adult or day.afternoon.activity.cost_child %}
+  - **Cost**: {% if day.afternoon.activity.cost_adult %}Adults ${{ day.afternoon.activity.cost_adult }}{% endif %}{% if day.afternoon.activity.cost_child %}, Children ${{ day.afternoon.activity.cost_child }}{% endif %}{% if day.afternoon.activity.free_under_3 %}, Free under 3{% endif %}
+  {% endif %}
+  - {{ day.afternoon.activity.description }}
+  {% if day.afternoon.activity.tips %}
+  - **Tips**: {{ day.afternoon.activity.tips | join('; ') }}
+  {% endif %}
+{% elif day.afternoon.restaurant %}
+- **{{ day.afternoon.restaurant.time }}**: {{ day.afternoon.restaurant.meal_type | title }} at **{{ day.afternoon.restaurant.name }}**
+  - **Cuisine**: {{ day.afternoon.restaurant.cuisine }}
+  - **Price**: {{ day.afternoon.restaurant.price_range }}
+  {% if day.afternoon.restaurant.average_cost_per_person %}
+  - **Average**: ~${{ day.afternoon.restaurant.average_cost_per_person }}/person
+  {% endif %}
+  - {{ day.afternoon.restaurant.description }}
+  - **Toddler-friendly**: {{ day.afternoon.restaurant.toddler_friendly_features | join(', ') }}
+{% endif %}
+
+**Evening ({{ day.evening.time_range }})**
+{% if day.evening.activity %}
+- **{{ day.evening.activity.time_start }}**: {{ day.evening.activity.name }}
+  - **Type**: {{ day.evening.activity.type | title }}
+  - **Duration**: {{ day.evening.activity.duration_minutes }} minutes
+  {% if day.evening.activity.cost_adult or day.evening.activity.cost_child %}
+  - **Cost**: {% if day.evening.activity.cost_adult %}Adults ${{ day.evening.activity.cost_adult }}{% endif %}{% if day.evening.activity.cost_child %}, Children ${{ day.evening.activity.cost_child }}{% endif %}{% if day.evening.activity.free_under_3 %}, Free under 3{% endif %}
+  {% endif %}
+  - {{ day.evening.activity.description }}
+  {% if day.evening.activity.tips %}
+  - **Tips**: {{ day.evening.activity.tips | join('; ') }}
+  {% endif %}
+{% elif day.evening.restaurant %}
+- **{{ day.evening.restaurant.time }}**: {{ day.evening.restaurant.meal_type | title }} at **{{ day.evening.restaurant.name }}**
+  - **Cuisine**: {{ day.evening.restaurant.cuisine }}
+  - **Price**: {{ day.evening.restaurant.price_range }}
+  {% if day.evening.restaurant.average_cost_per_person %}
+  - **Average**: ~${{ day.evening.restaurant.average_cost_per_person }}/person
+  {% endif %}
+  - {{ day.evening.restaurant.description }}
+  - **Toddler-friendly**: {{ day.evening.restaurant.toddler_friendly_features | join(', ') }}
+{% endif %}
+
+{% endfor %}
+
+---
+
+## 💡 Pro Tips
+
+{% for tip in pro_tips %}
+{{ loop.index }}. {{ tip }}
+{% endfor %}
+
+---
+
+**Ready to refine your plan?** Tell me:
+- Which hotel you prefer (1, 2, or 3)
+- Any activities you'd like to swap
+- Adjustments to timing or pace
+
+I'm here to make this perfect for your family!

@@ -161,26 +161,37 @@ def extract_travel_info(state: GraphState) -> GraphState:
     today = datetime.now()
     llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
 
-    system_prompt = f"""
-        - You are a travel information extractor. Extract trip details from natural conversation\n
-        - Return ONLY valid JSON matching the exact schema\n
-        - Extract only what is explicitly stated or strongly implied\n
-        - Don't invent or assume information\n
-        - Be concise - no additional commentary\n
-        - If information is unclear or missing, list it in the 'missing' array\n
-    """
+    system_prompt = """You are a travel information extractor. Extract trip details from natural conversation.
+- Return ONLY valid JSON matching the exact schema
+- Extract only what is explicitly stated or strongly implied
+- COMBINE information from ALL user messages in the conversation
+- Don't invent or assume information
+- Be concise - no additional commentary
+- If information is unclear or missing, list it in the 'missing' array"""
 
     prompt = f"""Extract trip information from natural conversation.
 
         CRITICAL RULES:
+        - COMBINE information from ALL user messages in the conversation
+        - Each user message may contain different pieces of information - merge them together
         - Use JSON null (not string "null") for missing/unknown values
         - Only set "destination" if user explicitly names a specific place
         - If destination is vague/uncertain, leave it as null and set "destination_hint" instead
         - Examples of what NOT to set as destination: "somewhere", "anywhere", "beach", "mountains"
+        - "near [city]" should be set as destination_hint, not destination
+
+        CONSTRAINT CAPTURE (IMPORTANT):
+        - Capture WHO is traveling with their characteristics in trip_purpose
+        - Include age groups, mobility needs, preferences in trip_purpose description
+        - Examples:
+          * "family activities with toddler" NOT just "family activities"
+          * "relaxing getaway with 70-year-old dad" NOT just "relaxing getaway"
+          * "beach vacation with wheelchair user" NOT just "beach vacation"
+        - This helps AI apply common sense when recommending travel options
 
         TODAY: {today.strftime("%A, %B %d, %Y")}
 
-        Conversation:
+        Conversation (COMBINE info from ALL messages):
         {conversation}
 
         Already extracted: {json.dumps(info, indent=2)}
@@ -203,8 +214,10 @@ def extract_travel_info(state: GraphState) -> GraphState:
         - List required fields that are missing or null in the "missing" array
         - "destination" is optional - only include if explicitly mentioned
         - "duration_days" is optional - can be computed from dates
-        - If travel_pack is implied (e.g., "family trip"), set travel_pack="family" and don't include in missing
-        - If dates can be reasonably inferred (e.g., "this weekend"), set the specific dates and don't include in missing
+        - If travel_pack is implied (e.g., "family trip", "with toddler"), set travel_pack="family" and don't include in missing
+        - If dates can be reasonably inferred (e.g., "this weekend"), calculate the actual YYYY-MM-DD dates and don't include in missing
+        - For "this weekend": if today is Mon-Wed, use upcoming Sat-Sun; if Thu-Sun, use the current/coming weekend
+        - For trip_purpose: infer from context (e.g., "family trip" → "family activities and relaxation")
         """
 
     try:
@@ -316,8 +329,10 @@ def extract_travel_info(state: GraphState) -> GraphState:
             tools["clarification"] = {"status": "incomplete", "missing": missing}
             return state
 
-    except Exception:
+    except Exception as e:
         # Fall back to a simple ask if parsing fails
+        logger.error("Clarification agent extraction failed: %s", e, exc_info=True)
+        logger.debug("Conversation context was: %s", conversation)
         tools["clarification"] = {"status": "incomplete"}
         add_message(state, AIMessage(content="Could you tell me where you're traveling from, your dates, and what you'd like to do?"))
         return state

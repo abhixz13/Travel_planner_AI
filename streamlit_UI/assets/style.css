@@ -1,0 +1,436 @@
+/*
+Travel Planner Streamlit UI - Custom Styles
+Dynamic, animated, and user-intuitive design
+*/
+
+/* ==================== Global Styles ==================== */
+
+:root {
+    --primary-color: #4A90E2;
+    --secondary-color: #50C878;
+    --accent-color: #FF6B6B;
+    --text-dark: #2C3E50;
+    --text-light: #7F8C8D;
+    --bg-light: #F8F9FA;
+    --bg-card: #FFFFFF;
+    --shadow-sm: 0 2px 4px rgba(0,0,0,0.1);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.15);
+    --shadow-lg: 0 8px 24px rgba(0,0,0,0.2);
+    --border-radius: 12px;
+    --transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Smooth scroll */
+html {
+    scroll-behavior: smooth;
+}
+
+/* Main container */
+.main {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    background-attachment: fixed;
+}
+
+.block-container {
+    max-width: 1200px;
+    padding: 2rem 1rem;
+    background: var(--bg-light);
+    border-radius: var(--border-radius);
+    box-shadow: var(--shadow-lg);
+    animation: fadeIn 0.6s ease-in;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* ==================== Header Styles ==================== */
+
+.itinerary-header {
+    text-align: center;
+    padding: 2rem 0;
+    background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+    border-radius: var(--border-radius);
+    color: white;
+    margin-bottom: 2rem;
+    box-shadow: var(--shadow-md);
+    animation: slideDown 0.5s ease-out;
+}
+
+@keyframes slideDown {
+    from {
+        opacity: 0;
+        transform: translateY(-30px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+.itinerary-header h1 {
+    margin: 0;
+    font-size: 2.5rem;
+    font-weight: 700;
+    text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+}
+
+.itinerary-header .subtitle {
+    font-size: 1.2rem;
+    opacity: 0.9;
+    margin-top: 0.5rem;
+}
+
+/* ==================== Card Styles ==================== */
+
+.hotel-card {
+    background: var(--bg-card);
+    border-radius: var(--border-radius);
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    box-shadow: var(--shadow-sm);
+    transition: var(--transition);
+    border-left: 4px solid var(--primary-color);
+}
+
+.hotel-card:hover {
+    box-shadow: var(--shadow-md);
+    transform: translateY(-4px);
+    border-left-color: var(--secondary-color);
+}
+
+.hotel-card h4 {
+    color: var(--text-dark);
+    margin: 0 0 0.5rem 0;
+    font-size: 1.3rem;
+}
+
+.hotel-card .price {
+    color: var(--accent-color);
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 0.5rem 0;
+}
+
+.hotel-card .location {
+    color: var(--text-light);
+    font-size: 0.95rem;
+    margin-bottom: 1rem;
+}
+
+/* ==================== Chat Message Styles ==================== */
+
+.stChatMessage {
+    animation: messageSlide 0.4s ease-out;
+}
+
+@keyframes messageSlide {
+    from {
+        opacity: 0;
+        transform: translateX(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+/* User messages */
+[data-testid="stChatMessageContent"]:has(.user-message) {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    border-radius: var(--border-radius);
+    padding: 1rem;
+}
+
+/* Assistant messages */
+[data-testid="stChatMessageContent"]:has(.assistant-message) {
+    background: var(--bg-card);
+    border-radius: var(--border-radius);
+    padding: 1rem;
+    box-shadow: var(--shadow-sm);
+}
+
+/* ==================== Button Styles ==================== */
+
+.stButton > button {
+    border-radius: var(--border-radius);
+    font-weight: 600;
+    transition: var(--transition);
+    border: none;
+    box-shadow: var(--shadow-sm);
+}
+
+.stButton > button:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+}
+
+.stButton > button:active {
+    transform: translateY(0);
+}
+
+/* Primary buttons */
+.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+    color: white;
+}
+
+.stButton > button[kind="primary"]:hover {
+    background: linear-gradient(135deg, var(--secondary-color), var(--primary-color));
+}
+
+/* ==================== Input Styles ==================== */
+
+.stTextInput > div > div > input,
+.stTextArea > div > div > textarea {
+    border-radius: var(--border-radius);
+    border: 2px solid #E0E0E0;
+    transition: var(--transition);
+}
+
+.stTextInput > div > div > input:focus,
+.stTextArea > div > div > textarea:focus {
+    border-color: var(--primary-color);
+    box-shadow: 0 0 0 3px rgba(74, 144, 226, 0.1);
+}
+
+/* Chat input */
+.stChatInput {
+    border-radius: var(--border-radius);
+    box-shadow: var(--shadow-md);
+}
+
+/* ==================== Metric Styles ==================== */
+
+[data-testid="stMetric"] {
+    background: var(--bg-card);
+    padding: 1rem;
+    border-radius: var(--border-radius);
+    box-shadow: var(--shadow-sm);
+    transition: var(--transition);
+}
+
+[data-testid="stMetric"]:hover {
+    box-shadow: var(--shadow-md);
+    transform: scale(1.05);
+}
+
+[data-testid="stMetricValue"] {
+    font-size: 1.8rem;
+    font-weight: 700;
+    color: var(--primary-color);
+}
+
+/* ==================== Expander Styles ==================== */
+
+.streamlit-expanderHeader {
+    background: var(--bg-card);
+    border-radius: var(--border-radius);
+    padding: 1rem;
+    font-weight: 600;
+    border-left: 4px solid var(--primary-color);
+    transition: var(--transition);
+}
+
+.streamlit-expanderHeader:hover {
+    background: var(--bg-light);
+    border-left-color: var(--secondary-color);
+}
+
+/* ==================== Progress & Loading Styles ==================== */
+
+.stSpinner > div {
+    border-color: var(--primary-color);
+    border-right-color: transparent;
+}
+
+/* Success/Info/Warning/Error boxes */
+.stSuccess, .stInfo, .stWarning, .stError {
+    border-radius: var(--border-radius);
+    padding: 1rem;
+    animation: slideIn 0.3s ease-out;
+}
+
+@keyframes slideIn {
+    from {
+        opacity: 0;
+        transform: translateX(-10px);
+    }
+    to {
+        opacity: 1;
+        transform: translateX(0);
+    }
+}
+
+/* ==================== Sidebar Styles ==================== */
+
+[data-testid="stSidebar"] {
+    background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
+    box-shadow: var(--shadow-lg);
+}
+
+[data-testid="stSidebar"] .stMarkdown {
+    color: white;
+}
+
+[data-testid="stSidebar"] .stButton > button {
+    background: white;
+    color: var(--primary-color);
+}
+
+[data-testid="stSidebar"] .stButton > button:hover {
+    background: var(--bg-light);
+}
+
+/* ==================== Radio Button Styles ==================== */
+
+.stRadio > div {
+    gap: 1rem;
+}
+
+.stRadio > div > label {
+    background: var(--bg-card);
+    padding: 1rem;
+    border-radius: var(--border-radius);
+    transition: var(--transition);
+    border: 2px solid transparent;
+}
+
+.stRadio > div > label:hover {
+    background: var(--bg-light);
+    border-color: var(--primary-color);
+    transform: translateX(5px);
+}
+
+/* Selected radio */
+.stRadio > div > label[data-selected="true"] {
+    background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+    color: white;
+    border-color: var(--primary-color);
+}
+
+/* ==================== Selectbox Styles ==================== */
+
+.stSelectbox > div > div {
+    border-radius: var(--border-radius);
+    border: 2px solid #E0E0E0;
+    transition: var(--transition);
+}
+
+.stSelectbox > div > div:hover {
+    border-color: var(--primary-color);
+}
+
+/* ==================== Time Slot Styles ==================== */
+
+.time-slot-container {
+    background: var(--bg-card);
+    border-radius: var(--border-radius);
+    padding: 1.5rem;
+    margin-bottom: 1rem;
+    border-left: 4px solid var(--accent-color);
+    box-shadow: var(--shadow-sm);
+    transition: var(--transition);
+}
+
+.time-slot-container:hover {
+    box-shadow: var(--shadow-md);
+    transform: translateX(5px);
+}
+
+/* ==================== Responsive Design ==================== */
+
+@media (max-width: 768px) {
+    .block-container {
+        padding: 1rem 0.5rem;
+    }
+
+    .itinerary-header h1 {
+        font-size: 1.8rem;
+    }
+
+    .hotel-card {
+        padding: 1rem;
+    }
+
+    [data-testid="stMetricValue"] {
+        font-size: 1.4rem;
+    }
+}
+
+/* ==================== Custom Scrollbar ==================== */
+
+::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--bg-light);
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+    background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+    border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(135deg, var(--secondary-color), var(--primary-color));
+}
+
+/* ==================== Animations ==================== */
+
+@keyframes pulse {
+    0%, 100% {
+        opacity: 1;
+    }
+    50% {
+        opacity: 0.7;
+    }
+}
+
+.pulse {
+    animation: pulse 2s infinite;
+}
+
+@keyframes bounce {
+    0%, 100% {
+        transform: translateY(0);
+    }
+    50% {
+        transform: translateY(-10px);
+    }
+}
+
+.bounce {
+    animation: bounce 1s infinite;
+}
+
+/* ==================== Tooltip Styles ==================== */
+
+[data-testid="stTooltipIcon"] {
+    color: var(--primary-color);
+}
+
+/* ==================== Link Button Styles ==================== */
+
+.stLinkButton > a {
+    border-radius: var(--border-radius);
+    transition: var(--transition);
+    text-decoration: none;
+    display: inline-block;
+}
+
+.stLinkButton > a:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-md);
+}

@@ -17,6 +17,7 @@ from agents.travel_planner_agent import create_itinerary
 from agents.travel_options_agent import find_travel_options
 from agents.accommodation_agent import find_accommodation
 from agents.activities_agent import find_activities
+from agents.refinement_agent import refine_itinerary, check_ready_to_finalize
 
 logger = logging.getLogger(__name__)
 
@@ -157,8 +158,10 @@ def _run_research(state: GraphState) -> GraphState:
             continue
 
         # Run the agent
+        print(f"\n🔍 Starting {section} research agent...")
         logger.info(f"Running {section} research agent...")
         patch = agent(state)
+        print(f"✓ {section} research agent completed")
         merged = False
         
         if isinstance(patch, dict) and section in patch:
@@ -200,6 +203,26 @@ def route_after_discover(state: GraphState):
     return "end"
 
 
+def route_after_compose(state: GraphState):
+    """Determine if user wants to refine itinerary or finalize."""
+    # Check if itinerary was just generated (first time)
+    ui_flags = state.get("ui_flags", {})
+
+    if not ui_flags.get("itinerary_presented"):
+        # First time showing itinerary - wait for user input
+        state.setdefault("ui_flags", {})["itinerary_presented"] = True
+        return "refine"
+
+    # Check if user is ready to finalize
+    if check_ready_to_finalize(state):
+        logger.info("User confirmed - finalizing itinerary")
+        return "end"
+
+    # User wants to continue refining
+    logger.info("Allowing further refinements")
+    return "refine"
+
+
 def build_graph():
     """Wire LangGraph nodes & edges for the prototype."""
     g = StateGraph(GraphState)
@@ -210,13 +233,19 @@ def build_graph():
     g.add_node("generate_plan", create_itinerary)
     g.add_node("run_research", _run_research)
     g.add_node("compose_response", compose_itinerary)
+    g.add_node("refine_itinerary", refine_itinerary)
 
     # Entry + routing
     g.set_entry_point("extract_info")
     g.add_conditional_edges(
         "extract_info",
         route_after_extract,
-        {"ask_more": END, "discover": "discover_destination", "plan": "generate_plan"},
+        {
+            "ask_more": END,
+            "discover": "discover_destination",
+            "plan": "generate_plan",
+            "refine": "refine_itinerary"  # NEW: Route to refinement
+        },
     )
     g.add_conditional_edges(
         "discover_destination",
@@ -231,6 +260,9 @@ def build_graph():
     g.add_edge("run_research", "compose_response")
     g.add_edge("compose_response", END)
 
+    # Refinement loop - goes back to END (waits for next user message)
+    g.add_edge("refine_itinerary", END)
+
     logger.debug("Compiling LangGraph.")
     return g.compile()
 
@@ -238,14 +270,22 @@ APP = build_graph()
 
 def run_session(state: GraphState) -> GraphState:
     """Run one turn and return updated state (LangSmith tracing via env vars)."""
+    print("\n" + "="*60)
+    print("🚀 STARTING SESSION")
+    print("="*60 + "\n")
+
     logger.info("=" * 60)
     logger.info("Starting run_session with %d messages.", len(state.get("messages", [])))
     logger.info("=" * 60)
-    
+
     try:
         new_state = APP.invoke(state)
+        print("\n" + "="*60)
+        print("✅ SESSION COMPLETED")
+        print("="*60 + "\n")
         logger.info("✓ Completed run_session; total messages now %d.", len(new_state.get("messages", [])))
         return new_state
     except Exception as exc:
+        print(f"\n❌ SESSION FAILED: {exc}\n")
         logger.exception("✗ Session failed with error:")
         raise

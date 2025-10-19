@@ -1,19 +1,30 @@
 # agents/plan_composer_agent.py
 """
-AI-driven Plan Composer - Generates complete day-by-day itinerary
-- Creates a full travel plan with schedule
-- Incorporates AI recommendations from research agents
-- Provides actionable itinerary, not just links
+AI-driven Plan Composer - Generates structured itinerary components.
+Uses Pydantic structured output for reliable, validated data.
 """
 
 from __future__ import annotations
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, Tuple
 import logging
+import json
+from pydantic import ValidationError
+
 from core.state import GraphState
 from core.conversation_manager import handle_ai_output
+from core.component_registry import register_component
+from core.context_tracker import update_context
+from core.component_schemas import (
+    StructuredItinerary,
+    validate_itinerary,
+    itinerary_to_dict
+)
+from core.itinerary_renderer import render_itinerary
 from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
+
+MAX_RETRIES = 2  # Retry up to 2 times on validation errors
 
 
 def _gather_trip_facts(state: GraphState) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
@@ -46,7 +57,7 @@ def _gather_trip_facts(state: GraphState) -> Tuple[Dict[str, Any], Dict[str, Any
         block = raw if isinstance(raw, dict) else {}
         recommendations = str(block.get("recommendations", "") or block.get("summary", "") or "").strip()
         sources_raw = block.get("sources") or block.get("results")
-        sources: List[Dict[str, str]] = []
+        sources = []
         if isinstance(sources_raw, list):
             for item in sources_raw:
                 if not isinstance(item, dict):
@@ -76,151 +87,303 @@ def _gather_trip_facts(state: GraphState) -> Tuple[Dict[str, Any], Dict[str, Any
     return facts, travel, stays, acts
 
 
-def compose_itinerary(state: GraphState) -> GraphState:
-    """Generate a complete day-by-day itinerary with AI recommendations."""
-    facts, travel, stays, acts = _gather_trip_facts(state)
+def _register_structured_components(state: GraphState, itinerary: StructuredItinerary) -> None:
+    """
+    Register all components from the structured itinerary.
+    No fuzzy parsing - direct registration from validated objects.
+    """
+    logger.debug("Registering structured components...")
 
-    context = {
-        "trip": facts,
-        "research": {
-            "travel": travel,
-            "stays": stays,
-            "activities": acts,
+    # Initialize component storage
+    if "itinerary_components" not in state:
+        state["itinerary_components"] = {
+            "metadata": {},
+            "accommodation": None,
+            "transport": None,
+            "days": {}
+        }
+
+    # Register metadata
+    state["itinerary_components"]["metadata"] = itinerary_to_dict(itinerary.metadata)
+
+    # Register transport options
+    for idx, transport_opt in enumerate(itinerary.transport_options):
+        register_component(
+            state,
+            component_data={
+                **itinerary_to_dict(transport_opt),
+                "option_index": idx,
+                "is_primary": (idx == 0)  # First option is primary/recommended
+            },
+            component_type="transport"
+        )
+    logger.debug(f"Registered {len(itinerary.transport_options)} transport options")
+
+    # Register accommodation options
+    # First option becomes primary, rest are alternatives
+    primary_hotel = itinerary.accommodation_options[0]
+    alternatives = [itinerary_to_dict(h) for h in itinerary.accommodation_options[1:]]
+
+    register_component(
+        state,
+        component_data={
+            **itinerary_to_dict(primary_hotel),
+            "alternatives": alternatives,
+            "selected": False  # Not yet selected by user
         },
-    }
-
-    system_prompt = (
-        "You are an expert travel planner creating a complete, actionable itinerary.\n\n"
-        "STRUCTURE YOUR RESPONSE AS:\n\n"
-        "# 🗺️ Your [Destination] Adventure\n"
-        "[Brief enthusiastic intro]\n\n"
-        "## 📍 Trip Overview\n"
-        "- Origin → Destination\n"
-        "- Dates & Duration\n"
-        "- Travel party\n\n"
-        "## 🚗 Getting There\n"
-        "[Synthesize travel recommendations into actionable advice]\n"
-        "- If driving: estimated time, route tips\n"
-        "- If flying: airport recommendations, flight options\n"
-        "Include 2-3 reference links\n\n"
-        "## 🏨 Where to Stay\n"
-        "[Provide 2-3 SPECIFIC hotel/area recommendations with WHY they're good]\n"
-        "Format as: **Hotel Name** - Brief description, family features, location benefits\n"
-        "Include 2-3 reference links\n\n"
-        "## 📅 Day-by-Day Itinerary\n\n"
-        "### Day 1 - [Theme]\n"
-        "**Morning (9am-12pm)**\n"
-        "- [Specific activity with details]\n"
-        "- Practical tips\n\n"
-        "**Afternoon (12pm-5pm)**\n"
-        "- [Activity]\n"
-        "- Tips\n\n"
-        "**Evening (5pm+)**\n"
-        "- [Dinner/activity recommendation]\n\n"
-        "[Repeat for each day]\n\n"
-        "## 💡 Pro Tips\n"
-        "- [3-5 specific, actionable tips for this trip]\n\n"
-        "## 🔗 Additional Resources\n"
-        "[Activity reference links]\n\n"
-        "---\n"
-        "**Ready to refine your plan?** Tell me if you'd like to adjust the pace, swap activities, or focus on specific interests!\n\n"
-        "CRITICAL RULES:\n"
-        "- Create a COMPLETE schedule, don't leave days blank\n"
-        "- Be SPECIFIC with activity names and locations\n"
-        "- Include PRACTICAL details (timing, costs if known, tips)\n"
-        "- Make it ACTIONABLE - a family could follow this plan\n"
-        "- Don't just ask what they want - MAKE RECOMMENDATIONS first\n"
-        "- Use the research to inform your suggestions\n"
-        "- Keep it engaging and enthusiastic but practical\n"
+        component_type="accommodation"
     )
+    logger.debug(f"Registered accommodation: {primary_hotel.name} (+ {len(alternatives)} alternatives)")
 
-    import json
-    user_prompt = (
-        "Create an ULTRA-DETAILED, COMPREHENSIVE day-by-day itinerary.\n\n"
-        "MINIMUM REQUIREMENTS:\n"
-        "- 2000+ words total\n"
-        "- 3-4 hotel recommendations with prices and 4-5 sentences each\n"
-        "- Hour-by-hour schedule for EACH day with specific times\n"
-        "- 6-8 activities with full details (name, cost, duration, tips)\n"
-        "- 10+ pro tips organized by category\n"
-        "- Specific restaurant names with why they're toddler-friendly\n\n"
-        "USE THE RESEARCH DATA BELOW - extract specific prices, names, and details:\n\n"
-        f"{json.dumps(context, indent=2)}\n\n"
-        "DO NOT use generic phrases like 'check website' or 'various options'.\n"
-        "BE SPECIFIC: Use exact names, prices, times, and locations from the research.\n"
-        "EXPLAIN WHY: Every recommendation needs reasoning specific to this family.\n"
-        "THINK TODDLER: All tips should be for families with toddlers (ages 1-3), not general families."
-    )
+    # Register daily activities
+    for day in itinerary.days:
+        day_num = day.day_number
 
-    llm = ChatOpenAI(
-        model="gpt-4o",
-        temperature=0.5,  # Slightly more creative
-        max_tokens=4096,  # Allow longer responses (was default ~2000)
-        request_timeout=60  # Give it time to think
-    )  # Use GPT-4 for better itinerary generation
-    logger.debug("Composer invoking LLM to generate complete itinerary.")
-    
-    try:
-        resp = llm.invoke([
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ])
-        
-        content = (resp.content or "").strip()
-        word_count = len(content.split())
-        logger.debug("Composer produced itinerary with %d characters, %d words.", len(content), word_count)
+        # Register morning slot
+        if day.morning.activity:
+            register_component(
+                state,
+                component_data=itinerary_to_dict(day.morning.activity),
+                component_type="activity",
+                day_number=day_num,
+                time_slot="morning"
+            )
+        elif day.morning.restaurant:
+            register_component(
+                state,
+                component_data=itinerary_to_dict(day.morning.restaurant),
+                component_type="restaurant",
+                day_number=day_num,
+                time_slot="morning"
+            )
 
-        # Ensure we have substantial content
-        if len(content) < 2000:
-            logger.warning("Generated itinerary seems too short, using fallback.")
-            content = _generate_fallback_itinerary(facts, travel, stays, acts)
+        # Register afternoon slot
+        if day.afternoon.activity:
+            register_component(
+                state,
+                component_data=itinerary_to_dict(day.afternoon.activity),
+                component_type="activity",
+                day_number=day_num,
+                time_slot="afternoon"
+            )
+        elif day.afternoon.restaurant:
+            register_component(
+                state,
+                component_data=itinerary_to_dict(day.afternoon.restaurant),
+                component_type="restaurant",
+                day_number=day_num,
+                time_slot="afternoon"
+            )
 
-    except Exception as exc:
-        logger.exception("Composer LLM invocation failed.")
-        content = _generate_fallback_itinerary(facts, travel, stays, acts)
+        # Register evening slot
+        if day.evening.activity:
+            register_component(
+                state,
+                component_data=itinerary_to_dict(day.evening.activity),
+                component_type="activity",
+                day_number=day_num,
+                time_slot="evening"
+            )
+        elif day.evening.restaurant:
+            register_component(
+                state,
+                component_data=itinerary_to_dict(day.evening.restaurant),
+                component_type="restaurant",
+                day_number=day_num,
+                time_slot="evening"
+            )
 
-    handle_ai_output(state, content)
-    return state
+        logger.debug(f"Registered Day {day_num} - {day.theme}")
+
+    logger.info(f"✓ Registered all components: {len(itinerary.accommodation_options)} hotels, {len(itinerary.days)} days")
 
 
-def _generate_fallback_itinerary(facts, travel, stays, acts) -> str:
-    """Generate a basic itinerary if LLM fails."""
+def _build_structured_prompt(facts: Dict[str, Any], research: Dict[str, Any]) -> str:
+    """Build the prompt for structured output generation."""
     dest = facts.get("destination") or facts.get("destination_hint") or "your destination"
     duration = facts.get("duration_days", 2)
-    
-    output = f"# Your {dest} Trip Plan\n\n"
-    output += f"## Overview\n"
-    output += f"- From: {facts.get('origin', 'your location')}\n"
-    output += f"- To: {dest}\n"
-    output += f"- Duration: {duration} days\n\n"
-    
-    if travel.get("recommendations"):
-        output += "## Getting There\n"
-        output += travel["recommendations"][:500] + "\n\n"
-        if travel.get("sources"):
-            output += "**Resources:**\n"
-            for src in travel["sources"][:3]:
-                output += f"- [{src['title']}]({src['url']})\n"
-            output += "\n"
-    
-    if stays.get("recommendations"):
-        output += "## Accommodations\n"
-        output += stays["recommendations"][:500] + "\n\n"
-        if stays.get("sources"):
-            output += "**Resources:**\n"
-            for src in stays["sources"][:3]:
-                output += f"- [{src['title']}]({src['url']})\n"
-            output += "\n"
-    
-    if acts.get("recommendations"):
-        output += "## Activities & Attractions\n"
-        output += acts["recommendations"][:700] + "\n\n"
-        if acts.get("sources"):
-            output += "**Resources:**\n"
-            for src in acts["sources"][:4]:
-                output += f"- [{src['title']}]({src['url']})\n"
-            output += "\n"
-    
-    output += "Let me know if you'd like me to adjust any part of this plan!"
-    
-    return output
+    purpose = facts.get("purpose", "family activities")
+    pack = facts.get("pack", "family")
+
+    prompt = f"""
+Create a COMPLETE {duration}-day itinerary for a {pack} trip to {dest}.
+
+**APPLY COMMON SENSE - THIS IS CRITICAL:**
+Trip purpose: {purpose}
+Travel party: {pack}
+
+Use human judgment when creating recommendations:
+- If traveling with toddlers/infants: Prioritize shorter activities (60-90 min max), avoid long car rides, include nap time considerations
+- If traveling with young children: Include age-appropriate activities, family-friendly restaurants with kids menus
+- If traveling with seniors/elderly: Choose accessible venues, moderate pace activities, comfortable accommodations with elevators
+- If purpose mentions accessibility needs: Ensure all venues are wheelchair accessible
+- Match activity intensity and duration to the travelers' actual capabilities
+
+**TRANSPORTATION - PROVIDE MULTIPLE OPTIONS:**
+- Generate 1-3 transport options (e.g., flying, driving, train)
+- Compare options based on research data and traveler needs
+- Set recommended=true for the BEST option given who's traveling
+- For each option, provide pros_cons summary
+- Example for family with toddler:
+  * Option 1 (recommended=true): Flying - "Pros: Much faster (3 hrs vs 19 hrs), easier with toddler. Cons: More expensive, need car rental"
+  * Option 2: Driving - "Pros: Cheaper, flexible schedule. Cons: 19 hours is extremely challenging with toddler, requires overnight stops"
+- Flag obviously impractical options in pros_cons
+
+CRITICAL REQUIREMENTS:
+1. Generate 1-3 transport options (recommended option first)
+2. Generate EXACTLY 3 accommodation options with real names and prices
+3. Create a complete schedule for each day with:
+   - Morning slot (9am-12pm): One activity OR restaurant
+   - Afternoon slot (12pm-5pm): One activity OR restaurant
+   - Evening slot (5pm-9pm): One activity OR restaurant
+4. All activities must have specific times, durations, and costs
+5. All restaurants must have specific meal times and family-friendly features
+6. Include 5-10 practical pro tips specific to the travel party
+
+TRIP DETAILS:
+- Origin: {facts.get('origin', 'unspecified')}
+- Destination: {dest}
+- Duration: {duration} days
+- Dates: {facts.get('dates', {}).get('departure')} to {facts.get('dates', {}).get('return')}
+- Purpose: {purpose}
+- Travel party: {pack}
+
+RESEARCH DATA TO USE:
+{json.dumps(research, indent=2)}
+
+SPECIFIC REQUIREMENTS:
+- Use actual hotel names, prices, and features from research
+- Use actual activity names, costs, and details from research
+- All times must be specific (e.g., "09:30 AM", not "morning")
+- All costs must be specific dollar amounts where available
+- **CRITICAL**: For transport costs, provide BOTH:
+  - cost_per_person: Per adult price
+  - total_cost_estimate: Total for the entire family/group
+  - cost_notes: Clear explanation (e.g., "for 2 adults, 1 toddler under 3")
+- Make it actionable - travelers could follow this plan directly
+- Tailor recommendations to the specific travel party mentioned in purpose
+"""
+    return prompt
+
+
+def _generate_with_retries(llm: ChatOpenAI, prompt: str, max_retries: int = MAX_RETRIES) -> StructuredItinerary:
+    """
+    Generate structured itinerary with retry logic on validation errors.
+
+    Args:
+        llm: LLM instance
+        prompt: Generation prompt
+        max_retries: Maximum retry attempts
+
+    Returns:
+        Validated StructuredItinerary
+
+    Raises:
+        ValidationError: If all retries fail
+    """
+    last_error = None
+
+    for attempt in range(max_retries + 1):
+        try:
+            logger.debug(f"Generation attempt {attempt + 1}/{max_retries + 1}")
+
+            # Use structured output with Pydantic model
+            structured_llm = llm.with_structured_output(StructuredItinerary)
+            result = structured_llm.invoke(prompt)
+
+            # Validate the result
+            if isinstance(result, StructuredItinerary):
+                logger.info(f"✓ Successfully generated structured itinerary on attempt {attempt + 1}")
+                return result
+            else:
+                # Shouldn't happen with with_structured_output, but handle it
+                validated = validate_itinerary(result)
+                logger.info(f"✓ Successfully generated and validated itinerary on attempt {attempt + 1}")
+                return validated
+
+        except ValidationError as e:
+            last_error = e
+            logger.warning(f"Validation failed on attempt {attempt + 1}: {e}")
+
+            if attempt < max_retries:
+                # Add error feedback to prompt for retry
+                error_msg = str(e)
+                prompt += f"\n\nPREVIOUS ATTEMPT FAILED - Fix these validation errors:\n{error_msg}"
+                logger.debug("Retrying with error feedback...")
+            else:
+                logger.error("All generation attempts failed")
+                raise
+
+        except Exception as e:
+            logger.exception(f"Unexpected error on attempt {attempt + 1}")
+            last_error = e
+            if attempt >= max_retries:
+                raise
+
+    # Should not reach here
+    raise last_error if last_error else RuntimeError("Generation failed")
+
+
+def compose_itinerary(state: GraphState) -> GraphState:
+    """
+    Generate a complete structured itinerary with validated components.
+    Uses Pydantic structured output - no fuzzy parsing needed.
+    """
+    facts, travel, stays, acts = _gather_trip_facts(state)
+
+    research = {
+        "trip": facts,
+        "travel": travel,
+        "stays": stays,
+        "activities": acts,
+    }
+
+    # Build prompt
+    prompt = _build_structured_prompt(facts, research)
+
+    # Initialize LLM with structured output support
+    llm = ChatOpenAI(
+        model="gpt-4o",
+        temperature=0.7,
+        max_tokens=4096,
+        request_timeout=60
+    )
+
+    logger.info("Composer generating structured itinerary...")
+
+    try:
+        # Generate with retry logic
+        itinerary = _generate_with_retries(llm, prompt, max_retries=MAX_RETRIES)
+
+        # Register all components
+        _register_structured_components(state, itinerary)
+
+        # Render to user-friendly markdown
+        markdown_output = render_itinerary(itinerary)
+
+        # Update context
+        update_context(
+            state,
+            conversation_stage="plan_generated",
+            current_topic="itinerary_review"
+        )
+
+        # Mark that itinerary has been presented
+        state.setdefault("ui_flags", {})["itinerary_presented"] = True
+
+        logger.info(f"✓ Itinerary generated and rendered: {len(markdown_output)} characters")
+
+        # Show user the rendered markdown
+        handle_ai_output(state, markdown_output)
+
+    except ValidationError:
+        logger.exception("Failed to generate valid itinerary after retries")
+        error_msg = "I encountered an issue generating your itinerary. Let me try a simpler approach..."
+        handle_ai_output(state, error_msg)
+
+    except Exception:
+        logger.exception("Unexpected error generating itinerary")
+        error_msg = "I ran into an unexpected issue. Could you provide a bit more detail about what you're looking for?"
+        handle_ai_output(state, error_msg)
+
+    return state

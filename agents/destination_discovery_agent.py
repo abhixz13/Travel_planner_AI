@@ -57,19 +57,33 @@ def _get_llm() -> ChatOpenAI:
 def _llm_candidate_prompt(ex: Dict[str, Any]) -> str:
     origin = ex.get("origin", "")
     dur = ex.get("duration_days", "")
+    dest_hint = ex.get("destination_hint", "").strip()
+
+    # If there's a destination hint, make it the PRIMARY constraint
+    if dest_hint:
+        location_guidance = (
+            f"- PRIMARY REQUIREMENT: Generate destinations {dest_hint}.\n"
+            f"- All 8 candidates MUST be in or around the area: {dest_hint}\n"
+            f"- Origin '{origin}' is only for travel time reference, NOT the destination area.\n"
+        )
+    else:
+        location_guidance = (
+            f"- Prioritize places reasonably reachable from '{origin}' for a {dur}-day trip.\n"
+        )
+
     return (
         "Generate up to 8 destination candidates for a short trip.\n"
         "Return pure JSON only: "
         '[{"name":"string","region":"string","state_or_country":"string","why":"string"}].\n'
         "Guidance:\n"
-        f"- Prioritize places reasonably reachable from '{origin}' for a {dur}-day trip.\n"
+        + location_guidance +
         "- Prefer options within practical driving time; if driving is long, consider short/direct flights (≤ ~2 hours) from the nearest major airport.\n"
         "- Fit the purpose, group, and constraints; avoid duplicates and ensure varied vibes (coast, mountains, small town, city, park).\n"
         f"Origin: {origin}\n"
         f"Purpose: {ex.get('trip_purpose','')}\n"
         f"Pack: {ex.get('travel_pack','')}\n"
         f"Duration days: {dur}\n"
-        f"Hint: {ex.get('destination_hint','')}\n"
+        f"Destination area: {dest_hint if dest_hint else 'flexible'}\n"
         f"Constraints: {ex.get('constraints',{})}\n"
     )
 
