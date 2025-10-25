@@ -3,18 +3,41 @@ FastAPI server for Travel Planner backend.
 Provides REST API endpoints for the Streamlit UI.
 """
 
+# CRITICAL: Load environment variables BEFORE any other imports
+# This ensures .env values are available when agent modules initialize
 import os
-import uuid
+from pathlib import Path
+from dotenv import load_dotenv
+
+# Load .env explicitly with override to ensure .env values take precedence
+env_path = Path(__file__).parent / ".env"
+load_dotenv(dotenv_path=env_path, override=True)
+
+# Validate OPENAI_API_KEY immediately after loading
+api_key = os.getenv("OPENAI_API_KEY", "")
+if not api_key:
+    raise RuntimeError(
+        f"OPENAI_API_KEY not found in environment after loading .env. "
+        f"Checked: {env_path}\n"
+        f"Current working directory: {os.getcwd()}\n"
+        f"Please ensure .env file exists and contains OPENAI_API_KEY"
+    )
+
+# Diagnostic logging for environment setup
 import logging
+logger = logging.getLogger(__name__)
+logger.info(f"✓ OPENAI_API_KEY loaded successfully (prefix: {api_key[:20]}...)")
+logger.info(f"✓ Environment loaded from: {env_path}")
+
+# NOW import application modules (after env vars are guaranteed to be set)
+import uuid
 import time
 import json
 from typing import Optional, Dict, Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from dotenv import load_dotenv
 from starlette.middleware.base import BaseHTTPMiddleware
-from pathlib import Path
 
 from core.logging_config import configure_logging
 from core.conversation_manager import (
@@ -24,13 +47,11 @@ from core.conversation_manager import (
 )
 from core.orchestrator import run_session
 
-# Load environment variables
-load_dotenv()
+# Configure additional environment settings
 os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
 configure_logging()
 
-# Set up logging
-logger = logging.getLogger(__name__)
+# Set up additional logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
