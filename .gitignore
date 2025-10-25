@@ -35,3 +35,7 @@ streamlit_UI/.env.example
 agents/Archieve.py
 logs/
 .DS_Store
+-e 
+# Environment files
+*.env
+*.env.*
