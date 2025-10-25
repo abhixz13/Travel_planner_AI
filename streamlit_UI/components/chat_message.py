@@ -8,7 +8,7 @@ from typing import Dict, Any
 
 def render_message(message: Dict[str, Any]):
     """
-    Render a chat message with role-based styling.
+    Render a chat message with role-based styling and structured content parsing.
 
     Args:
         message: Message dict with 'role', 'content', and optional 'metadata'
@@ -31,7 +31,12 @@ def render_message(message: Dict[str, Any]):
         if is_error:
             st.error(content)
         else:
-            st.markdown(content)
+            # Enhanced rendering for structured content (cards, tables)
+            if "┌─" in content and "└─" in content:
+                # Box-drawn card - render with better formatting
+                st.markdown(f"```\n{content}\n```")
+            else:
+                st.markdown(content)
 
         # Show metadata if present (destinations, extracted info, etc.)
         if metadata:

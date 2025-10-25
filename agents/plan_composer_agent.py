@@ -29,12 +29,21 @@ MAX_RETRIES = 2  # Retry up to 2 times on validation errors
 
 def _gather_trip_facts(state: GraphState) -> Tuple[Dict[str, Any], Dict[str, Any], Dict[str, Any], Dict[str, Any]]:
     """Collect trip facts and research results."""
-    plan: Dict[str, Any] = state.get("current_plan", {}) or {}
-    ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
+    plan: Dict[str, Any] = state.get("current_plan") or {}
+    ex: Dict[str, Any] = state.get("extracted_info") or {}
 
-    plan_summary: Dict[str, Any] = plan.get("summary", {}) if isinstance(plan.get("summary"), dict) else {}
+    # Defensive: ensure plan is dict
+    if not isinstance(plan, dict):
+        plan = {}
 
-    dates_block = plan_summary.get("dates") if isinstance(plan_summary.get("dates"), dict) else {}
+    # Get summary safely
+    summary_raw = plan.get("summary")
+    plan_summary: Dict[str, Any] = summary_raw if isinstance(summary_raw, dict) else {}
+
+    # Get dates safely
+    dates_raw = plan_summary.get("dates")
+    dates_block = dates_raw if isinstance(dates_raw, dict) else {}
+
     dep = dates_block.get("departure") if dates_block else None
     ret = dates_block.get("return") if dates_block else None
     dur = dates_block.get("duration_days") if dates_block else None
@@ -198,14 +207,112 @@ def _register_structured_components(state: GraphState, itinerary: StructuredItin
     logger.info(f"✓ Registered all components: {len(itinerary.accommodation_options)} hotels, {len(itinerary.days)} days")
 
 
-def _build_structured_prompt(facts: Dict[str, Any], research: Dict[str, Any]) -> str:
+def _build_structured_prompt(facts: Dict[str, Any], research: Dict[str, Any], hotel_selected: bool = False) -> str:
     """Build the prompt for structured output generation."""
     dest = facts.get("destination") or facts.get("destination_hint") or "your destination"
     duration = facts.get("duration_days", 2)
     purpose = facts.get("purpose", "family activities")
     pack = facts.get("pack", "family")
 
-    prompt = f"""
+    # Stage 1: Just options (no hotel selected yet)
+    if not hotel_selected:
+        prompt = f"""
+Create transport options and accommodation choices for a {pack} trip to {dest}.
+
+**IMPORTANT: Generate ONLY transport and hotel options. Do NOT create daily activities yet.**
+The user needs to select a hotel first before we plan day-by-day activities.
+
+**APPLY COMMON SENSE - THIS IS CRITICAL:**
+Trip purpose: {purpose}
+Travel party: {pack}
+
+Use human judgment when creating recommendations:
+- If traveling with toddlers/infants: Prioritize shorter travel times, avoid long car rides, include nap time considerations
+- If traveling with young children: Consider entertainment needs, frequent breaks
+- If traveling with seniors/elderly: Choose accessible options, moderate pace
+- If purpose mentions accessibility needs: Ensure all options are wheelchair accessible
+- Match recommendations to the travelers' actual capabilities and comfort
+
+**TRANSPORTATION - MANDATORY: PROVIDE AT LEAST 2 OPTIONS:**
+
+**YOU MUST GENERATE AT LEAST 2 TRANSPORT OPTIONS.** Compare flying vs driving (or train if applicable):
+
+For trips > 5 hours driving distance:
+1. **Option 1 (Flying)**: Include flight time, airports, typical cost, pros/cons for THIS travel party
+2. **Option 2 (Driving)**: Include drive time, route, cost estimate, pros/cons for THIS travel party
+3. Set recommended=true on the BETTER option based on trip_purpose and travel party needs
+
+Example for "family with toddler" on 15+ hour drive route:
+```
+transport_options: [
+  {{
+    mode: "flying",
+    recommended: true,
+    duration_minutes: 180,
+    cost_per_person: 450,
+    total_cost_estimate: 900,
+    cost_notes: "for 2 adults, 1 toddler under 3 flies free",
+    pros_cons: "Pros: Much faster (3 hrs vs 30 hrs), toddler can nap on plane, less stressful. Cons: More expensive, need car rental at destination."
+  }},
+  {{
+    mode: "driving",
+    recommended: false,
+    duration_minutes: 1800,
+    total_cost_estimate: 320,
+    cost_notes: "fuel and meals for 2 adults, 1 toddler",
+    pros_cons: "Pros: Cheaper, flexible schedule, own car. Cons: 30 hours is EXTREMELY challenging with toddler, requires 2 overnight stops, many rest breaks, exhausting for parents."
+  }}
+]
+```
+
+**DO NOT generate only 1 transport option. Users need comparison to make informed decisions.**
+
+CRITICAL REQUIREMENTS:
+1. **Generate AT LEAST 2 transport options** (mark the recommended one with recommended=true)
+2. Generate EXACTLY 3 accommodation options with real names and prices
+3. **STOP HERE - DO NOT GENERATE DAILY ACTIVITIES**
+   - Set days = [] (EMPTY ARRAY)
+   - DO NOT create Day 1, Day 2, etc.
+   - DO NOT include morning/afternoon/evening activities
+   - DO NOT include restaurants or time slots
+   - User must choose a hotel BEFORE we plan daily activities
+4. Include 3-5 general pro tips about traveling to this destination (not activity-specific)
+
+**VALIDATION CHECK:**
+Before responding, verify:
+- transport_options array has at least 2 items ✓
+- accommodation_options array has exactly 3 items ✓
+- days array is EMPTY [] ✓
+- If days has any items, DELETE THEM ALL
+
+TRIP DETAILS:
+- Origin: {facts.get('origin', 'unspecified')}
+- Destination: {dest}
+- Duration: {duration} days
+- Dates: {facts.get('dates', {}).get('departure')} to {facts.get('dates', {}).get('return')}
+- Purpose: {purpose}
+- Travel party: {pack}
+
+RESEARCH DATA TO USE:
+{json.dumps(research, indent=2)}
+
+SPECIFIC REQUIREMENTS:
+- Use actual hotel names, prices, and features from research
+- **HANDLING COSTS:**
+  - If exact cost found in research: Use it (e.g., "$129/night", "$450 per person")
+  - If range in research: Use the range (e.g., "from $99", "$400-500")
+  - If not in research: Use "Call for rates" or omit if no data available
+  - DO NOT make up specific prices without research backing
+- **CRITICAL**: For transport costs, provide BOTH:
+  - cost_per_person: Per adult price (from research)
+  - total_cost_estimate: Total for the entire family/group (from research)
+  - cost_notes: Clear explanation (e.g., "for 2 adults, 1 toddler under 3")
+- Make transport and hotel options actionable and well-researched
+- Tailor recommendations to the specific travel party mentioned in purpose
+"""
+    else:
+        # Stage 2: Full itinerary with daily activities
+        prompt = f"""
 Create a COMPLETE {duration}-day itinerary for a {pack} trip to {dest}.
 
 **APPLY COMMON SENSE - THIS IS CRITICAL:**
@@ -219,24 +326,24 @@ Use human judgment when creating recommendations:
 - If purpose mentions accessibility needs: Ensure all venues are wheelchair accessible
 - Match activity intensity and duration to the travelers' actual capabilities
 
-**TRANSPORTATION - PROVIDE MULTIPLE OPTIONS:**
-- Generate 1-3 transport options (e.g., flying, driving, train)
-- Compare options based on research data and traveler needs
-- Set recommended=true for the BEST option given who's traveling
-- For each option, provide pros_cons summary
-- Example for family with toddler:
-  * Option 1 (recommended=true): Flying - "Pros: Much faster (3 hrs vs 19 hrs), easier with toddler. Cons: More expensive, need car rental"
-  * Option 2: Driving - "Pros: Cheaper, flexible schedule. Cons: 19 hours is extremely challenging with toddler, requires overnight stops"
-- Flag obviously impractical options in pros_cons
+**TRANSPORTATION - USE EXACT OPTIONS FROM RESEARCH:**
+- **CRITICAL**: Extract and use the EXACT transport options already presented in the research data
+- DO NOT generate new transport modes or options
+- The research already contains options that were presented to the user (e.g., Drive, Fly, Hybrid)
+- Parse each option from the research recommendations and structure it
+- Preserve the original option details: mode, duration, costs, pros/cons
+- If research mentions "Drive", "Fly", "Hybrid" - use those exact modes
+- DO NOT add "train", "bus", or other modes not mentioned in research
+- Set recommended=true ONLY for the option the research recommended
 
 CRITICAL REQUIREMENTS:
-1. Generate 1-3 transport options (recommended option first)
+1. Extract and use the exact transport options from research (preserve the modes mentioned - typically Drive, Fly, Hybrid)
 2. Generate EXACTLY 3 accommodation options with real names and prices
 3. Create a complete schedule for each day with:
    - Morning slot (9am-12pm): One activity OR restaurant
    - Afternoon slot (12pm-5pm): One activity OR restaurant
    - Evening slot (5pm-9pm): One activity OR restaurant
-4. All activities must have specific times, durations, and costs
+4. For activities: Extract duration and cost from research if available; if not mentioned, provide reasonable estimates
 5. All restaurants must have specific meal times and family-friendly features
 6. Include 5-10 practical pro tips specific to the travel party
 
@@ -255,10 +362,16 @@ SPECIFIC REQUIREMENTS:
 - Use actual hotel names, prices, and features from research
 - Use actual activity names, costs, and details from research
 - All times must be specific (e.g., "09:30 AM", not "morning")
-- All costs must be specific dollar amounts where available
+- **HANDLING COSTS AND DURATIONS:**
+  - If exact cost found in research: Use it (e.g., "$25 per person", "$150/night")
+  - If range in research: Use the range (e.g., "$15-20", "from $99")
+  - If not in research: Use "Check website" or "Free" if clearly a free attraction
+  - DO NOT make up specific prices (e.g., don't invent "$23" if research says nothing)
+  - For duration: If research mentions it (e.g., "2-3 hours"), use it
+  - If not mentioned: Provide typical estimate (e.g., "60-90 minutes for zoo visit")
 - **CRITICAL**: For transport costs, provide BOTH:
-  - cost_per_person: Per adult price
-  - total_cost_estimate: Total for the entire family/group
+  - cost_per_person: Per adult price (from research)
+  - total_cost_estimate: Total for the entire family/group (from research)
   - cost_notes: Clear explanation (e.g., "for 2 adults, 1 toddler under 3")
 - Make it actionable - travelers could follow this plan directly
 - Tailor recommendations to the specific travel party mentioned in purpose
@@ -326,20 +439,110 @@ def _generate_with_retries(llm: ChatOpenAI, prompt: str, max_retries: int = MAX_
 
 def compose_itinerary(state: GraphState) -> GraphState:
     """
-    Generate a complete structured itinerary with validated components.
-    Uses Pydantic structured output - no fuzzy parsing needed.
+    Generate staged itinerary output based on what research has been completed.
+
+    Stage 1: Travel only → Show travel options + ask for confirmation
+    Stage 2: Travel + Stays → Show travel + hotels + ask for hotel selection
+    Stage 3: All research → Generate full itinerary with daily activities
     """
-    facts, travel, stays, acts = _gather_trip_facts(state)
+    # Determine what research has been completed
+    plan = state.get("current_plan", {}) or {}
+    has_travel = bool(plan.get("travel"))
+    has_stays = bool(plan.get("stays"))
+    has_activities = bool(plan.get("activities"))
 
-    research = {
-        "trip": facts,
-        "travel": travel,
-        "stays": stays,
-        "activities": acts,
-    }
+    logger.info(f"Composer stage check: travel={has_travel}, stays={has_stays}, activities={has_activities}")
 
-    # Build prompt
-    prompt = _build_structured_prompt(facts, research)
+    # Safety check: If no research at all, don't try to compose
+    if not has_travel and not has_stays and not has_activities:
+        logger.warning("Composer called with no research data - skipping")
+        return state
+
+    try:
+        facts, travel, stays, acts = _gather_trip_facts(state)
+    except Exception as e:
+        logger.exception("Error in _gather_trip_facts")
+        raise Exception(f"Failed in _gather_trip_facts: {str(e)}") from e
+
+    try:
+        research = {
+            "trip": facts,
+            "travel": travel,
+            "stays": stays,
+            "activities": acts,
+        }
+    except Exception as e:
+        logger.exception("Error building research dict")
+        raise Exception(f"Failed building research dict: {str(e)}") from e
+
+    # Special handling for travel-only stage
+    if has_travel and not has_stays and not has_activities:
+        # Check if travel was already confirmed - if so, we tried stays and it failed
+        ui_flags = state.get("ui_flags", {}) or {}
+        travel_confirmed = ui_flags.get("travel_confirmed", False)
+
+        if travel_confirmed:
+            # Travel is confirmed but stays failed - this is an error state, not normal flow
+            logger.warning("Composer: Stays research failed after travel confirmation - prompting user")
+
+            error_msg = (
+                "I'm having trouble finding accommodation options for this destination. "
+                "This might be because the destination is very specific (like a park or attraction).\n\n"
+                "Would you like me to:\n"
+                "1. Search for hotels in the nearby city/area\n"
+                "2. Skip hotel selection and proceed to activity planning\n"
+                "3. Try a different destination\n\n"
+                "Please let me know how you'd like to proceed!"
+            )
+
+            handle_ai_output(state, error_msg)
+            return state
+
+        logger.info("Composer: Travel-only stage - showing travel options and requesting confirmation")
+
+        # Extract travel recommendations
+        travel_text = travel.get("recommendations", "") if isinstance(travel, dict) else ""
+
+        confirmation_msg = (
+            f"## 🚗 Travel Options\n\n"
+            f"{travel_text}\n\n"
+            f"---\n\n"
+            f"**Does this look good?**\n\n"
+            f"Reply '**yes**' to proceed to accommodation search, or let me know if you'd like different travel options."
+        )
+
+        handle_ai_output(state, confirmation_msg)
+        return state
+
+    # Check if hotel has been selected
+    try:
+        components = state.get("itinerary_components") or {}
+        if not isinstance(components, dict):
+            components = {}
+        hotel = components.get("accommodation") if isinstance(components, dict) else None
+        if hotel is None or not isinstance(hotel, dict):
+            hotel = {}
+        hotel_selected = hotel.get("selected", False) if isinstance(hotel, dict) else False
+        logger.debug(f"Composer stage check: hotel_selected={hotel_selected}, components type={type(components)}, hotel type={type(hotel)}")
+    except Exception as e:
+        logger.exception("Error checking hotel selection")
+        raise Exception(f"Failed checking hotel selection: {str(e)}") from e
+
+    # Build prompt based on stage
+    try:
+        if hotel_selected:
+            logger.info("Composition stage: FULL ITINERARY - Generating complete day-by-day itinerary")
+        else:
+            logger.info("Composition stage: TRAVEL + HOTELS - Generating travel options + hotel choices")
+            # IMPORTANT: When showing hotels, travel is implicitly confirmed
+            # User has moved past travel and is now choosing hotels
+            state.setdefault("ui_flags", {})["travel_confirmed"] = True
+            logger.info("Set travel_confirmed=True (user is now choosing hotels)")
+
+        prompt = _build_structured_prompt(facts, research, hotel_selected=hotel_selected)
+    except Exception as e:
+        logger.exception("Error building prompt")
+        raise Exception(f"Failed building prompt: {str(e)}") from e
 
     # Initialize LLM with structured output support
     llm = ChatOpenAI(
@@ -355,8 +558,58 @@ def compose_itinerary(state: GraphState) -> GraphState:
         # Generate with retry logic
         itinerary = _generate_with_retries(llm, prompt, max_retries=MAX_RETRIES)
 
+        # SAFETY CHECK: If hotel not selected, force days to be empty
+        if not hotel_selected and itinerary.days:
+            logger.warning(f"LLM generated {len(itinerary.days)} days despite hotel not being selected. Forcing days to empty.")
+            # Properly recreate the model with empty days
+            itinerary_dict = itinerary.model_dump()
+            itinerary_dict['days'] = []
+            itinerary = StructuredItinerary.model_validate(itinerary_dict)
+
+        # REORDER HOTELS: If hotel was selected, put the selected one first
+        if hotel_selected and hotel and isinstance(hotel, dict):
+            selected_hotel_name = hotel.get("name", "").strip()
+            if selected_hotel_name and itinerary.accommodation_options:
+                # Find the selected hotel in the accommodation_options
+                selected_index = None
+                for idx, h in enumerate(itinerary.accommodation_options):
+                    if h.name.strip() == selected_hotel_name:
+                        selected_index = idx
+                        break
+
+                # Reorder: move selected hotel to first position
+                if selected_index is not None and selected_index > 0:
+                    itinerary_dict = itinerary.model_dump()
+                    hotel_list = itinerary_dict['accommodation_options']
+                    selected = hotel_list.pop(selected_index)
+                    hotel_list.insert(0, selected)
+                    itinerary = StructuredItinerary.model_validate(itinerary_dict)
+                    logger.info(f"Reordered hotels: moved '{selected_hotel_name}' to first position")
+
         # Register all components
         _register_structured_components(state, itinerary)
+
+        # IMPORTANT: Mark travel/stays as complete in current_plan when generated by composer
+        # This is needed for stage detection to work correctly
+        plan = state.setdefault("current_plan", {})
+
+        # Mark travel as complete if generated
+        if itinerary.transport_options and not plan.get("travel"):
+            plan["travel"] = {
+                "recommendations": f"Generated {len(itinerary.transport_options)} transport options",
+                "sources": [],
+                "_generated_by_composer": True
+            }
+            logger.info(f"Marked travel as complete in current_plan ({len(itinerary.transport_options)} options)")
+
+        # Mark stays as complete if generated (but only when not hotel_selected)
+        if not hotel_selected and itinerary.accommodation_options and not plan.get("stays"):
+            plan["stays"] = {
+                "recommendations": f"Generated {len(itinerary.accommodation_options)} hotel options",
+                "sources": [],
+                "_generated_by_composer": True
+            }
+            logger.info(f"Marked stays as complete in current_plan ({len(itinerary.accommodation_options)} hotels)")
 
         # Render to user-friendly markdown
         markdown_output = render_itinerary(itinerary)

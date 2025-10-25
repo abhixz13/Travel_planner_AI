@@ -104,27 +104,40 @@ _PROMPT = (
     "You are a family accommodation expert.\n"
     "WORKFLOW:\n"
     "1. Create 1-2 focused search queries based on trip context and traveler needs\n"
-    "2. Use tavily_stays or serp_stays to find relevant articles\n"
-    "3. Use fetch_page_content on the TOP 2-3 most relevant URLs to read actual content\n"
-    "4. **APPLY COMMON SENSE based on who's traveling:**\n"
+    "2. Use tavily_stays or serp_stays to find relevant hotel listing pages\n"
+    "3. Use fetch_page_content on the TOP 3-5 most relevant URLs to extract actual pricing and details\n"
+    "4. **EXTRACT SPECIFIC PRICING from web pages:**\n"
+    "   - Look for: 'per night', 'nightly rate', 'from $', 'starting at', 'price', 'rate'\n"
+    "   - Examples: '$129/night', 'from $99', 'average $150 per night', 'rates from $85'\n"
+    "   - If no price found: indicate 'call for rates' or 'check availability'\n"
+    "5. **APPLY COMMON SENSE based on who's traveling:**\n"
     "   - Toddlers/infants: Prioritize cribs, high chairs, kitchenettes, kid-safe rooms, pools\n"
     "   - Young children: Look for family suites, kids activities, child-friendly dining\n"
     "   - Seniors/elderly: Prioritize elevators, ground-floor rooms, accessibility, quiet locations\n"
     "   - Accessibility needs: Ensure wheelchair access, grab bars, accessible bathrooms\n"
-    "5. Synthesize into 2-3 SPECIFIC hotel/area recommendations with details:\n"
-    "   - Name of property/area\n"
-    "   - Why it's good for THIS specific travel party\n"
-    "   - Price range if available\n"
-    "   - Relevant amenities for the travelers (not generic features)\n"
-    "6. End with your recommendations in clear prose, then list source URLs\n\n"
+    "6. Synthesize into 3 SPECIFIC hotel recommendations with this structure:\n"
+    "   \n"
+    "   **Hotel Name** — $X/night\n"
+    "   [2-3 sentences about the property]\n"
+    "   Location: [City, area]\n"
+    "   Features:\n"
+    "   - [Relevant amenity for THIS travel party]\n"
+    "   - [Another relevant feature]\n"
+    "   - [Third feature matching traveler needs]\n"
+    "   [Website link]\n"
+    "   \n"
+    "7. CRITICAL: Extract real prices from web content - don't make up generic ranges\n"
+    "8. Provide recommendations in clear prose with specific data points\n\n"
     "CRITICAL: Match amenities to actual traveler needs - use human judgment!"
 )
 
 _AGENT = None
 _FALLBACK_MODE = False
 _ACK_REPLIES = {
-    "ok", "okay", "yes", "yep", "yeah", "sure", "sounds good", 
+    "ok", "okay", "sure", "sounds good",
     "looks good", "thanks", "thank you",
+    # NOTE: "yes", "yep", "yeah" removed - these are user confirmations, not acknowledgments
+    # User saying "yes" to travel means they want to proceed to stays research
 }
 
 def _is_brief_ack(message: Optional[str]) -> bool:
@@ -196,6 +209,19 @@ def find_accommodation(state: GraphState) -> Optional[Dict[str, Any]]:
         logger.debug("Accommodation agent: inputs incomplete for research; returning None.")
         return None
 
+    # Get additional context for geographic verification
+    dest_hint = (ex.get("destination_hint") or "").strip()  # e.g., "near Seattle"
+    origin = (ex.get("origin") or "").strip()
+
+    logger.info(f"Accommodation search for destination: '{dest}', hint: '{dest_hint}', from: '{origin}'")
+
+    # Check for refinement criteria
+    refinement = state.get("refinement_criteria", {}).get("accommodation")
+    user_refinement_request = ""
+    if refinement:
+        user_refinement_request = refinement.get("user_request", "")
+        logger.info(f"Accommodation agent using refinement criteria: {user_refinement_request[:100]}")
+
     try:
         agent = _build_agent()
     except RuntimeError:
@@ -211,17 +237,56 @@ def find_accommodation(state: GraphState) -> Optional[Dict[str, Any]]:
     context = (
         f"{context_prefix}TRIP CONTEXT:\n"
         f"- destination: {dest}\n"
+        f"- regional context: {dest_hint if dest_hint else 'not specified'}\n"
         f"- dates: {dep} → {ret}\n"
         f"- party: adults={ex.get('num_adults','')} kids={ex.get('kids_ages','')}\n"
         f"- purpose: {ex.get('trip_purpose','')} | preferences: {ex.get('travel_pack','')}\n\n"
-        "MANDATORY: Use fetch_page_content on AT LEAST 4 URLs (preferably 5-6).\n"
-        "Focus on: hotels.com, booking.com, tripadvisor, local hotel sites.\n"
-        "Extract REAL PRICES and SPECIFIC amenities from the content.\n"
-        "Your recommendations must include exact prices or 'call for rates'.\n"
-        "Each hotel description must be 4-6 sentences explaining WHY it's perfect."
     )
-    
-    logger.debug("Accommodation agent invoking ReAct for %s", dest)
+
+    # Add refinement instructions if present
+    if user_refinement_request:
+        context += (
+            f"**USER REFINEMENT REQUEST:**\n"
+            f'The user said: "{user_refinement_request}"\n'
+            f"IMPORTANT: Adjust your search to match this feedback.\n"
+            f"- If they want 'cheaper': Focus on budget hotels, hostels, lower price ranges\n"
+            f"- If they mention location (e.g., 'downtown', 'beach'): Prioritize that area\n"
+            f"- If they want 'different options': Find completely new hotels, different areas\n\n"
+        )
+
+    # Build geographic verification instructions
+    verification_instructions = ""
+    if any(keyword in dest.lower() for keyword in ["park", "falls", "beach", "trail", "museum", "center", "monument", "attraction"]):
+        verification_instructions = (
+            f"**CRITICAL FIRST STEP - VERIFY LOCATION:**\n"
+            f"1. Search for 'where is {dest}' or '{dest} location' to find the EXACT city/region\n"
+            f"2. Verify this matches the regional context: {dest_hint if dest_hint else 'user traveling from ' + origin}\n"
+            f"3. ONLY AFTER verification, search for hotels using the verified city name\n"
+            f"4. Example: If '{dest}' is in Kirkland, WA → search 'hotels in Kirkland Washington near {dest}'\n"
+            f"5. DO NOT assume location - VERIFY first using web search!\n\n"
+        )
+    else:
+        verification_instructions = (
+            f"The destination appears to be a city/region name.\n"
+            f"Search for hotels in '{dest}'"
+            f"{' (verify it is ' + dest_hint + ')' if dest_hint else ''}.\n\n"
+        )
+
+    context += (
+        f"{verification_instructions}"
+        f"MANDATORY STEPS:\n"
+        f"1. Use tavily_stays or serp_stays to VERIFY the geographic location\n"
+        f"2. Use fetch_page_content on AT LEAST 4-6 URLs (preferably 5-6)\n"
+        f"3. Focus on: hotels.com, booking.com, tripadvisor, Google Hotels\n"
+        f"4. Search using the VERIFIED location (city name + state/country)\n"
+        f"5. Extract REAL PRICES and SPECIFIC amenities from the content\n"
+        f"6. Your recommendations must include exact prices or 'call for rates'\n"
+        f"7. Each hotel description must be 4-6 sentences explaining WHY it's perfect\n\n"
+        f"Example good search query: 'hotels near [verified landmark] in [verified city, state]'\n"
+        f"Example bad search query: 'hotels in [first word of landmark]' (DON'T DO THIS)"
+    )
+
+    logger.debug("Accommodation agent invoking ReAct for %s (context: %s)", dest, dest_hint or origin)
     
     try:
         result = agent.invoke(

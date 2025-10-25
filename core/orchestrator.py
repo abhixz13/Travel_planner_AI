@@ -76,7 +76,146 @@ def _should_merge(payload: Dict[str, Any]) -> bool:
 
 
 # -----------------------------
-# Idempotent research runner
+# Staged research runners
+# -----------------------------
+def _run_travel_research(state: GraphState) -> GraphState:
+    """Run only travel research."""
+    # print("\n" + "="*60)
+    # print("🔍 TRAVEL RESEARCH AGENT")
+    # print("="*60)
+
+    _ensure_plan_initialized(state)
+    plan = state["current_plan"]
+    ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
+
+    # print(f"Input parameters:")
+    # print(f"  Origin: {ex.get('origin', 'N/A')}")
+    # print(f"  Destination: {ex.get('destination', 'N/A')}")
+    # print(f"  Dates: {ex.get('departure_date', 'N/A')} to {ex.get('return_date', 'N/A')}")
+    # print(f"  Purpose: {ex.get('trip_purpose', 'N/A')}")
+
+    logger.info("Running travel research only...")
+
+    # Only run travel agent
+    from agents.travel_options_agent import find_travel_options
+    patch = find_travel_options(state)
+
+    if isinstance(patch, dict) and "travel" in patch:
+        payload = patch["travel"]
+        if _should_merge(payload):
+            # Compute fingerprint and store
+            fp = compute_fp(ex, ["origin", "destination", "departure_date", "return_date", "trip_purpose"])
+            payload["_fp"] = fp
+            plan["travel"] = payload
+            logger.info("✓ Travel research completed and merged")
+            # print(f"✓ Travel research successful")
+            # print(f"   Fingerprint: {fp[:16]}...")
+            # print("="*60 + "\n")
+        else:
+            logger.warning("✗ Travel research returned insufficient data")
+            # print("✗ Travel research returned no results")
+            # print("="*60 + "\n")
+    else:
+        # print("✗ Travel agent returned no data")
+        # print("="*60 + "\n")
+        pass
+
+    return state
+
+
+def _run_stays_research(state: GraphState) -> GraphState:
+    """Run only stays research."""
+    # print("\n" + "="*60)
+    # print("🏨 ACCOMMODATION RESEARCH AGENT")
+    # print("="*60)
+
+    _ensure_plan_initialized(state)
+    plan = state["current_plan"]
+    ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
+
+    # Check for refinement criteria
+    refinement = state.get("refinement_criteria", {}).get("accommodation")
+    # if refinement:
+    #     print(f"Refinement request: {refinement.get('user_request', 'N/A')}")
+
+    # print(f"Input parameters:")
+    # print(f"  Destination: {ex.get('destination', 'N/A')}")
+    # print(f"  Dates: {ex.get('departure_date', 'N/A')} to {ex.get('return_date', 'N/A')}")
+    # print(f"  Purpose: {ex.get('trip_purpose', 'N/A')}")
+
+    logger.info("Running stays research only...")
+
+    # Only run stays agent
+    from agents.accommodation_agent import find_accommodation
+    patch = find_accommodation(state)
+
+    if isinstance(patch, dict) and "stays" in patch:
+        payload = patch["stays"]
+        if _should_merge(payload):
+            fp = compute_fp(ex, ["destination", "departure_date", "return_date", "trip_purpose"])
+            payload["_fp"] = fp
+            plan["stays"] = payload
+            logger.info("✓ Stays research completed and merged")
+            # print(f"✓ Accommodation research successful")
+            # print(f"   Fingerprint: {fp[:16]}...")
+            # print("="*60 + "\n")
+        else:
+            logger.warning("✗ Stays research returned insufficient data")
+            # print("✗ Stays research returned no results")
+            # print("="*60 + "\n")
+    else:
+        # print("✗ Accommodation agent returned no data")
+        # print("="*60 + "\n")
+        pass
+
+    return state
+
+
+def _run_activities_research(state: GraphState) -> GraphState:
+    """Run only activities research."""
+    # print("\n" + "="*60)
+    # print("🎯 ACTIVITIES RESEARCH AGENT")
+    # print("="*60)
+
+    _ensure_plan_initialized(state)
+    plan = state["current_plan"]
+    ex: Dict[str, Any] = state.get("extracted_info", {}) or {}
+
+    # print(f"Input parameters:")
+    # print(f"  Destination: {ex.get('destination', 'N/A')}")
+    # print(f"  Purpose: {ex.get('trip_purpose', 'N/A')}")
+    # print(f"  Duration: {ex.get('duration_days', 'N/A')} days")
+
+    logger.info("Running activities research only...")
+
+    # Only run activities agent
+    from agents.activities_agent import find_activities
+    patch = find_activities(state)
+
+    if isinstance(patch, dict) and "activities" in patch:
+        payload = patch["activities"]
+        if _should_merge(payload):
+            fp = compute_fp(ex, ["destination", "trip_purpose"])
+            payload["_fp"] = fp
+            plan["activities"] = payload
+            logger.info("✓ Activities research completed and merged")
+            # print(f"✓ Activities research successful")
+            # print(f"   Fingerprint: {fp[:16]}...")
+            # print("="*60 + "\n")
+        else:
+            logger.warning("✗ Activities research returned insufficient data")
+            # print("✗ Activities research returned no results")
+            # print("="*60 + "\n")
+    else:
+        # print("✗ Activities agent returned no data")
+        # print("="*60 + "\n")
+        pass
+
+    return state
+
+
+# -----------------------------
+# Idempotent research runner (legacy - for full workflow)
 # -----------------------------
 def _run_research(state: GraphState) -> GraphState:
     """Run research agents with fingerprint-based gating and strict merge rules."""
@@ -146,6 +285,7 @@ def _run_research(state: GraphState) -> GraphState:
                 prev_fp,
                 current_fp,
             )
+            # print(f"✓ {section} options unchanged (using cached results)")
             continue
 
         if not ready_fn(ex):
@@ -155,13 +295,14 @@ def _run_research(state: GraphState) -> GraphState:
                 prev_fp,
                 current_fp,
             )
+            # print(f"⊘ Skipping {section} research (inputs incomplete)")
             continue
 
         # Run the agent
-        print(f"\n🔍 Starting {section} research agent...")
+        # print(f"\n🔍 Searching for {section} options...")
         logger.info(f"Running {section} research agent...")
         patch = agent(state)
-        print(f"✓ {section} research agent completed")
+        # print(f"✓ {section} research completed")
         merged = False
         
         if isinstance(patch, dict) and section in patch:
@@ -223,15 +364,42 @@ def route_after_compose(state: GraphState):
     return "refine"
 
 
+def route_after_refine(state: GraphState):
+    """After refinement, check if we need to re-compose with selected hotel."""
+    ui_flags = state.get("ui_flags") or {}
+    components = state.get("itinerary_components") or {}
+
+    # Check if hotel was just selected
+    if ui_flags.get("hotel_selected"):
+        # Clear flag to avoid loop
+        ui_flags["hotel_selected"] = False
+
+        # Check if we have days already (full itinerary exists)
+        if isinstance(components, dict) and components.get("days"):
+            logger.info("Hotel selected but full itinerary already exists - going to END")
+            return "end"
+        else:
+            logger.info("Hotel selected - re-composing with full itinerary")
+            return "compose_full"
+
+    # Normal refinement flow - go to END
+    return "end"
+
+
 def build_graph():
-    """Wire LangGraph nodes & edges for the prototype."""
+    """Wire LangGraph nodes & edges for staged workflow."""
     g = StateGraph(GraphState)
 
     # Nodes
     g.add_node("extract_info", extract_travel_info)
     g.add_node("discover_destination", suggest_destinations)
-    g.add_node("generate_plan", create_itinerary)
-    g.add_node("run_research", _run_research)
+
+    # Staged research nodes
+    g.add_node("research_travel", _run_travel_research)
+    g.add_node("research_stays", _run_stays_research)
+    g.add_node("research_activities", _run_activities_research)
+
+    # Composition and refinement
     g.add_node("compose_response", compose_itinerary)
     g.add_node("refine_itinerary", refine_itinerary)
 
@@ -243,36 +411,45 @@ def build_graph():
         {
             "ask_more": END,
             "discover": "discover_destination",
-            "plan": "generate_plan",
-            "refine": "refine_itinerary"  # NEW: Route to refinement
+            "research_travel": "research_travel",
+            "research_stays": "research_stays",
+            "research_activities": "research_activities",
+            "refine": "refine_itinerary"
         },
     )
+
     g.add_conditional_edges(
         "discover_destination",
         route_after_discover,
-        {"generate_plan": "generate_plan", "end": END},
+        {"generate_plan": "research_travel", "end": END},  # After discovery, start with travel
     )
 
-    # Research fan-out handled inside run_research to guarantee completeness
-    g.add_edge("generate_plan", "run_research")
-
-    # Compose once all research is gathered
-    g.add_edge("run_research", "compose_response")
+    # Each research stage → compose → END (waits for user)
+    g.add_edge("research_travel", "compose_response")
+    g.add_edge("research_stays", "compose_response")
+    g.add_edge("research_activities", "compose_response")
     g.add_edge("compose_response", END)
 
-    # Refinement loop - goes back to END (waits for next user message)
-    g.add_edge("refine_itinerary", END)
+    # Refinement loop - conditional based on hotel selection
+    g.add_conditional_edges(
+        "refine_itinerary",
+        route_after_refine,
+        {
+            "compose_full": "compose_response",  # Re-compose with full itinerary
+            "end": END
+        }
+    )
 
-    logger.debug("Compiling LangGraph.")
+    logger.debug("Compiling LangGraph for staged workflow.")
     return g.compile()
 
 APP = build_graph()
 
 def run_session(state: GraphState) -> GraphState:
     """Run one turn and return updated state (LangSmith tracing via env vars)."""
-    print("\n" + "="*60)
-    print("🚀 STARTING SESSION")
-    print("="*60 + "\n")
+    # print("\n" + "="*60)
+    # print("🚀 STARTING SESSION")
+    # print("="*60 + "\n")
 
     logger.info("=" * 60)
     logger.info("Starting run_session with %d messages.", len(state.get("messages", [])))
@@ -280,12 +457,12 @@ def run_session(state: GraphState) -> GraphState:
 
     try:
         new_state = APP.invoke(state)
-        print("\n" + "="*60)
-        print("✅ SESSION COMPLETED")
-        print("="*60 + "\n")
+        # print("\n" + "="*60)
+        # print("✅ SESSION COMPLETED")
+        # print("="*60 + "\n")
         logger.info("✓ Completed run_session; total messages now %d.", len(new_state.get("messages", [])))
         return new_state
     except Exception as exc:
-        print(f"\n❌ SESSION FAILED: {exc}\n")
+        # print(f"\n❌ SESSION FAILED: {exc}\n")
         logger.exception("✗ Session failed with error:")
         raise

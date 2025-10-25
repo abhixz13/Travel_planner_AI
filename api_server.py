@@ -205,13 +205,6 @@ async def chat(request: ChatRequest):
     Returns:
         ChatResponse with AI response and conversation state
     """
-    print(f"\n{'='*60}")
-    print(f"📨 NEW MESSAGE from user")
-    print(f"{'='*60}")
-    print(f"Message: {request.message}")
-    print(f"Conversation ID: {request.conversation_id or 'NEW'}")
-    print(f"{'='*60}\n")
-
     logger.info(f"Received chat request: conversation_id={request.conversation_id}, message={request.message[:50]}...")
     try:
         # Get or create conversation

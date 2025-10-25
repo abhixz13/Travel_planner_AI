@@ -103,32 +103,48 @@ def fetch_page_content(url: str) -> str:
 _PROMPT = (
     "You are a family travel logistics expert.\n"
     "WORKFLOW:\n"
-    "1. Create 1-2 focused queries for transport research (flights, driving, airports)\n"
-    "2. Use tavily_travel or serp_travel to find information\n"
-    "3. Use fetch_page_content on TOP 2-3 URLs to get detailed info\n"
-    "4. **APPLY COMMON SENSE based on who's traveling:**\n"
+    "1. **DETERMINE NEAREST AIRPORTS:**\n"
+    "   - If origin is a small city/town, search for 'nearest airport to [city]'\n"
+    "   - Examples: Tracy, CA → SFO/OAK/SJC (NOT LAX), Tacoma → SEA\n"
+    "   - NEVER assume major city airports for small towns\n"
+    "2. Create 1-2 focused queries for transport research (flights, driving, airports)\n"
+    "3. Use tavily_travel or serp_travel to find information\n"
+    "4. Use fetch_page_content on TOP 2-3 URLs to get detailed info\n"
+    "5. **APPLY COMMON SENSE based on who's traveling:**\n"
     "   - Toddlers/infants: Prioritize shorter travel times, avoid 10+ hour drives as primary option\n"
     "   - Young children: Consider entertainment needs, frequent breaks\n"
     "   - Seniors/elderly: Prioritize comfort, accessibility, avoid overly strenuous travel\n"
     "   - Accessibility needs: Ensure transport options are wheelchair/mobility-aid friendly\n"
-    "5. **Compare MULTIPLE options** when both flight and driving are viable:\n"
-    "   - Present both flight AND driving options with pros/cons\n"
-    "   - Make clear recommendation based on traveler needs\n"
-    "   - Flag impractical options (e.g., '19-hour drive with toddler not recommended')\n"
-    "6. Synthesize into actionable travel advice:\n"
-    "   - Recommended transport method with reasoning\n"
-    "   - If driving: distance, time, route highlights, rest stop suggestions\n"
-    "   - If flying: recommended airports, flight duration, airlines, family tips\n"
-    "   - Cost estimates for all options if available\n"
-    "7. Provide clear recommendations in prose, then list sources\n\n"
-    "CRITICAL: Use human judgment - don't recommend obviously impractical options as primary choice!"
+    "6. **Compare ALL THREE OPTIONS** (MANDATORY - present all 3):\n"
+    "   a) **Drive Only**: Total drive distance/time from origin to final destination\n"
+    "   b) **Fly Only**: Nearest origin airport → nearest destination airport, with costs\n"
+    "   c) **Hybrid (Fly + Drive)**: Drive to major airport (e.g., SFO) + fly to destination airport + drive/rental to final location\n"
+    "      - Calculate total travel time including all segments\n"
+    "      - Include costs: flight + parking/rental car\n"
+    "      - This often provides best balance of time and convenience\n"
+    "7. **Make a clear recommendation** based on traveler needs, with specific reasoning\n"
+    "8. **Format your response** with three clear sections:\n"
+    "   ### Option 1: Driving (Recommended/Not Recommended)\n"
+    "   [Details, pros/cons, costs]\n"
+    "   \n"
+    "   ### Option 2: Flying\n"
+    "   [Details, pros/cons, costs]\n"
+    "   \n"
+    "   ### Option 3: Hybrid (Fly + Drive)\n"
+    "   [Details, pros/cons, costs]\n"
+    "   \n"
+    "   ### Recommendation\n"
+    "   [Clear recommendation with reasoning based on traveler profile]\n\n"
+    "CRITICAL: ALWAYS present all 3 options! Use human judgment to rank them appropriately."
 )
 
 _AGENT = None
 _FALLBACK_MODE = False
 _ACK_REPLIES = {
-    "ok", "okay", "yes", "yep", "yeah", "sure", "sounds good",
+    "ok", "okay", "sure", "sounds good",
     "looks good", "thanks", "thank you",
+    # NOTE: "yes", "yep", "yeah" removed - these are user confirmations, not acknowledgments
+    # Acknowledgments are passive; confirmations require action
 }
 
 def _is_brief_ack(message: Optional[str]) -> bool:
@@ -222,11 +238,21 @@ def find_travel_options(state: GraphState) -> Optional[Dict[str, Any]]:
         f"- destination: {dest}\n"
         f"- when: {when}\n"
         f"- purpose: {ex.get('trip_purpose', '')}\n\n"
-        "MANDATORY: Use fetch_page_content on AT LEAST 4 URLs.\n"
+        "CRITICAL FIRST STEP - FIND NEAREST AIRPORTS:\n"
+        f"- Search for 'nearest major airport to {origin}' BEFORE looking up flights\n"
+        f"- Search for 'nearest airport to {dest}' for destination\n"
+        "- Use the actual nearest airports, NOT the most famous ones in the state/region\n"
+        "- Verify airport codes and flight availability from those specific airports\n\n"
+        "MANDATORY: Present ALL THREE OPTIONS:\n"
+        "1. DRIVE ONLY: Total drive from {origin} to {dest}\n"
+        "2. FLY ONLY: Nearest local airport to nearest destination airport\n"
+        "3. HYBRID: Drive to major airport (e.g., SFO/OAK) + Fly to destination + Drive/rent to final location\n\n"
+        "MANDATORY: Use fetch_page_content on AT LEAST 4-6 URLs.\n"
         "Find EXACT drive times, distances, routes from Google Maps or similar.\n"
-        "If flying is an option, research REAL flight prices and airports.\n"
-        "Make a CLEAR recommendation (drive vs fly) with 3-4 specific reasons.\n"
-        "Include toddler-specific travel tips (rest stops, timing, entertainment)."
+        "Research REAL flight prices from multiple departure airports.\n"
+        "For hybrid option: Calculate total time (drive to airport + flight + drive to destination).\n"
+        "Make a CLEAR recommendation with 3-4 specific reasons.\n"
+        "Include family/toddler-specific travel tips (rest stops, timing, entertainment)."
     )
     
     logger.debug("Travel agent invoking ReAct: %s → %s", origin, dest)

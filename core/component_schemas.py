@@ -31,7 +31,7 @@ class AccommodationOption(BaseModel):
 
 class TransportOption(BaseModel):
     """Transportation details for getting to destination."""
-    mode: Literal["driving", "flying", "train", "bus"] = Field(..., description="Transport mode")
+    mode: Literal["driving", "flying", "train", "bus", "hybrid"] = Field(..., description="Transport mode")
     duration_minutes: Optional[int] = Field(None, ge=0, description="Travel duration")
     cost_per_person: Optional[int] = Field(None, ge=0, description="Cost per person in USD (e.g., per adult)")
     total_cost_estimate: Optional[int] = Field(None, ge=0, description="Total estimated cost for entire family/group in USD")
@@ -159,10 +159,9 @@ class StructuredItinerary(BaseModel):
     )
 
     days: List[DayItinerary] = Field(
-        ...,
-        min_length=1,
+        default_factory=list,
         max_length=7,
-        description="Day-by-day itinerary"
+        description="Day-by-day itinerary (empty until hotel selected)"
     )
 
     pro_tips: List[str] = Field(
@@ -173,7 +172,9 @@ class StructuredItinerary(BaseModel):
     @field_validator('days')
     @classmethod
     def validate_days_sequential(cls, v: List[DayItinerary]) -> List[DayItinerary]:
-        """Ensure days are numbered sequentially from 1."""
+        """Ensure days are numbered sequentially from 1 (if any days exist)."""
+        if not v:  # Allow empty list
+            return v
         sorted_days = sorted(v, key=lambda d: d.day_number)
         for i, day in enumerate(sorted_days, start=1):
             if day.day_number != i:

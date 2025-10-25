@@ -30,7 +30,8 @@ def main():
         try:
             state = run_session(state)
         except Exception as exc:
-            print("AI Travel Planner: I ran into an error: " + str(exc).split("\n")[0])
+            error_msg = str(exc).split("\n")[0]
+            print(f"\nAI Travel Planner: I ran into an error: {error_msg}")
             print("Please verify your API keys or retry in a moment.")
             continue
 

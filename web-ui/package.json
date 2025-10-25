@@ -1,0 +1,14 @@
+{
+  "name": "travel-planner-web-ui",
+  "version": "1.0.0",
+  "private": true,
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-markdown": "^8.0.7"
+  },
+  "scripts": {
+    "start": "python3 -m http.server 3000",
+    "dev": "open http://localhost:3000 && python3 -m http.server 3000"
+  }
+}

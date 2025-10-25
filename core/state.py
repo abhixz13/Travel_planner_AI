@@ -9,7 +9,9 @@ class GraphState(TypedDict, total=False):
     extracted_info: Dict[str, Any]
     current_plan: Dict[str, Any]
     tool_results: Dict[str, Any]
-    
+    ui_flags: Dict[str, Any]  # Workflow state flags (travel_confirmed, hotel_confirmed, etc.)
+    refinement_criteria: Dict[str, Any]  # User refinement requests (accommodation, etc.)
+
     # ===== Phase 1 Additions =====
     itinerary_components: Dict[str, Any]  # Module 1.1: Component registry
     conversation_context: Dict[str, Any]  # Module 1.2: Context tracking
@@ -25,6 +27,8 @@ def new_state(
         "extracted_info": dict(extracted_info or {}),
         "current_plan": {},
         "tool_results": {},
+        "ui_flags": {},  # Initialize workflow flags
+        "refinement_criteria": {},  # Initialize refinement requests
         "itinerary_components": {
             "metadata": {},
             "accommodation": None,

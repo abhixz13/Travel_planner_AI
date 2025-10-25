@@ -92,21 +92,39 @@ _PROMPT = (
     "WORKFLOW:\n"
     "1. Create 1-2 focused search queries for family/toddler activities\n"
     "2. Use serp_activities or tavily_activities to find guides\n"
-    "3. Use fetch_page_content on TOP 2-3 URLs to read actual recommendations\n"
-    "4. Synthesize into 3-5 SPECIFIC activity recommendations:\n"
-    "   - Activity name and description\n"
-    "   - Why it's perfect for toddlers/families\n"
-    "   - Practical tips (duration, cost, best time)\n"
-    "   - Any age considerations\n"
-    "5. Provide recommendations in clear prose, then list sources\n\n"
-    "CRITICAL: READ content with fetch_page_content - don't just list links!"
+    "3. Use fetch_page_content on TOP 3-5 URLs to read actual recommendations and extract specific details\n"
+    "4. For EACH activity, extract structured information from the web pages:\n"
+    "   **CRITICAL - EXTRACT THESE SPECIFIC DETAILS:**\n"
+    "   - **Duration**: Look for phrases like 'visit takes', 'allow X hours', 'typical visit', 'plan for'\n"
+    "     Examples: '2-3 hours typical', 'allow 90 minutes', 'half-day activity'\n"
+    "   - **Cost**: Search for 'admission', 'price', 'entry fee', 'tickets', 'cost', '$'\n"
+    "     Examples: '$25 per adult', 'free admission', '$15-20 per person', 'admission included'\n"
+    "   - **Operating hours**: Look for 'hours', 'open', 'closes at'\n"
+    "     Examples: '9am-5pm', 'open daily 10-6', 'seasonal hours'\n"
+    "   - **Best time**: Look for recommendations about timing\n"
+    "     Examples: 'arrive early to avoid crowds', 'mornings are best', 'skip weekends'\n"
+    "5. Synthesize into 4-6 SPECIFIC activity recommendations with this structure:\n"
+    "   \n"
+    "   **Activity Name** (Type: indoor/outdoor/educational/etc.)\n"
+    "   - Description: [1-2 sentences about what it is]\n"
+    "   - Duration: [Extracted from research, e.g., '60-90 minutes' or '2-3 hours typical']\n"
+    "   - Cost: [Extracted from research, e.g., '$15 per person' or 'free admission' or 'call for rates']\n"
+    "   - Hours: [If found in research]\n"
+    "   - Why perfect for [traveler type]: [specific reasons]\n"
+    "   - Tips: [practical advice]\n"
+    "   \n"
+    "6. If duration/cost not found on web page, indicate 'check website' or 'typical [activity type] takes X'\n"
+    "7. Provide recommendations in clear, structured prose with specific data points\n\n"
+    "CRITICAL: Use fetch_page_content to READ actual content - extract real duration/cost data!"
 )
 
 _AGENT = None
 _FALLBACK_MODE = False
 _ACK_REPLIES = {
-    "ok", "okay", "yes", "yep", "yeah", "sure", "sounds good",
+    "ok", "okay", "sure", "sounds good",
     "looks good", "thanks", "thank you",
+    # NOTE: "yes", "yep", "yeah" removed - these are user confirmations, not acknowledgments
+    # User saying "yes" to hotel means they want to proceed to activities research
 }
 
 def _is_brief_ack(message: Optional[str]) -> bool:
@@ -146,7 +164,7 @@ def _build_agent():
     llm = ChatOpenAI(
         model="gpt-4o-mini",
         temperature=0.2,
-        max_tokens=2048  # Ensure detailed responses
+    max_tokens=2048  # Ensure detailed responses
     )
     
     try:

@@ -22,80 +22,30 @@ logger = logging.getLogger(__name__)
 
 def detect_refinement_intent(user_message: str) -> Optional[Dict[str, Any]]:
     """
-    Detect if user wants to refine/select components.
+    Simplified intent detection - only for hotel selection.
+    Other intents are handled by LLM router.
 
     Returns:
         Dict with intent details or None if no refinement detected
-        {
-            "action": "select_hotel" | "swap_activity" | "remove_component" | "modify_time",
-            "target": component reference,
-            "details": additional info
-        }
     """
-    msg_lower = user_message.lower()
+    msg_lower = user_message.lower().strip()
 
-    # Hotel selection patterns (more lenient matching)
+    # Simple hotel selection patterns
     hotel_patterns = [
-        r'(?:select|choose|pick|prefer|want|book)\s+(?:hotel\s+)?(?:option\s+)?(\d+)',
-        r'(?:go with|let\'s do)\s+(?:hotel\s+)?(?:option\s+)?(\d+)',
-        r'hotel\s+(?:option\s+)?(\d+)\s*(?:looks good|sounds good|is better|please)?',
-        r'(?:i|we)\'d like\s+(?:hotel\s+)?(?:option\s+)?(\d+)',
-        r'^\s*hotel\s+(\d+)\s*$',  # Simple "hotel 1" pattern
-        r'option\s+(\d+)',  # Just "option 1"
-        r'^\s*(\d+)\s*$',  # Just the number alone (e.g., "1", "2", "3")
+        r'^\s*(\d+)\s*$',  # Just "1", "2", "3"
+        r'(?:hotel|option)\s+(\d+)',  # "hotel 2", "option 3"
     ]
 
     for pattern in hotel_patterns:
         match = re.search(pattern, msg_lower)
         if match:
             hotel_num = int(match.group(1))
-            # Only accept 1, 2, or 3
             if 1 <= hotel_num <= 3:
                 return {
                     "action": "select_hotel",
                     "target": f"hotel_{hotel_num}",
                     "selection_index": hotel_num - 1
                 }
-
-    # Budget/price-based accommodation changes
-    budget_patterns = [
-        r'(?:cheaper|budget|less expensive|lower cost|affordable)\s+(?:place|hotel|accommodation|option)',
-        r'(?:looking for|want|need)\s+(?:something\s+)?(?:cheaper|more affordable)',
-        r'(?:show|find|suggest)\s+(?:me\s+)?(?:cheaper|budget)\s+(?:options|hotels)',
-    ]
-
-    for pattern in budget_patterns:
-        if re.search(pattern, msg_lower):
-            return {
-                "action": "change_budget",
-                "target": "accommodation",
-                "preference": "cheaper"
-            }
-
-    # Activity swap patterns
-    swap_patterns = [
-        r'swap\s+(?:the\s+)?(.+?)\s+(?:activity|for)',
-        r'replace\s+(?:the\s+)?(.+?)\s+with',
-        r'change\s+(?:the\s+)?(.+?)\s+(?:to|activity)',
-        r'(?:skip|remove)\s+(?:the\s+)?(.+)',
-    ]
-
-    for pattern in swap_patterns:
-        match = re.search(pattern, msg_lower)
-        if match:
-            return {
-                "action": "swap_activity",
-                "target": match.group(1).strip(),
-                "details": user_message
-            }
-
-    # Time modification patterns
-    if any(word in msg_lower for word in ["earlier", "later", "move", "reschedule"]):
-        return {
-            "action": "modify_time",
-            "target": "schedule",
-            "details": user_message
-        }
 
     return None
 
@@ -106,7 +56,7 @@ def handle_hotel_selection(state: GraphState, selection_index: int) -> bool:
 
     Args:
         state: GraphState
-        selection_index: Index of hotel to select (0-based)
+        selection_index: Index of hotel to select (0-based: 0=hotel1, 1=hotel2, 2=hotel3)
 
     Returns:
         True if successful
@@ -120,15 +70,25 @@ def handle_hotel_selection(state: GraphState, selection_index: int) -> bool:
 
     alternatives = current_hotel.get("alternatives", [])
 
-    if selection_index < 0 or selection_index >= len(alternatives):
-        logger.warning(f"Invalid hotel selection index: {selection_index}")
+    # Total available options = 1 primary + N alternatives
+    total_options = 1 + len(alternatives)
+
+    if selection_index < 0 or selection_index >= total_options:
+        logger.warning(f"Invalid hotel selection index: {selection_index} (available: 0-{total_options-1})")
         return False
 
-    # Get the selected alternative
-    selected_hotel = alternatives[selection_index]
+    # If selecting option 0 (primary hotel), just mark it as selected
+    if selection_index == 0:
+        current_hotel["selected"] = True
+        logger.info(f"✓ Hotel selection confirmed: {current_hotel.get('name')} (already primary)")
+        return True
+
+    # Otherwise, swap with alternative at index (selection_index - 1)
+    alternative_index = selection_index - 1
+    selected_hotel = alternatives[alternative_index]
 
     # Build new alternatives list (all hotels except selected)
-    new_alternatives = [current_hotel] + alternatives[:selection_index] + alternatives[selection_index + 1:]
+    new_alternatives = [current_hotel] + alternatives[:alternative_index] + alternatives[alternative_index + 1:]
 
     # Remove component_id fields from alternatives
     for alt in new_alternatives:
@@ -225,9 +185,42 @@ def finalize_selections(state: GraphState) -> str:
     return summary
 
 
+def handle_hotel_refinement_request(state: GraphState, user_message: str) -> GraphState:
+    """
+    User wants different hotel options (cheaper, different location, etc.).
+    Store refinement criteria and flag for re-search.
+    """
+    from datetime import datetime
+
+    # Store refinement criteria
+    state.setdefault("refinement_criteria", {})["accommodation"] = {
+        "user_request": user_message,
+        "refined_at": datetime.now().isoformat()
+    }
+
+    # Clear previous hotel options (will trigger re-search)
+    components = state.get("itinerary_components", {})
+    if "accommodation" in components:
+        components.pop("accommodation")
+
+    # Clear accommodation alternatives from current_plan to force re-search
+    current_plan = state.get("current_plan", {})
+    if "stays" in current_plan:
+        # Keep fingerprint to force re-search by clearing it
+        current_plan["stays"] = None
+
+    logger.info(f"Hotel refinement requested: {user_message[:100]}")
+    add_message(state, AIMessage(content="Got it! Let me find better options for you..."))
+
+    return state
+
+
 def refine_itinerary(state: GraphState) -> GraphState:
     """
     Main refinement agent - handles user selections and modifications.
+
+    Simplified: Only handles direct hotel selection here.
+    Hotel refinement requests are detected by LLM router and routed to "plan".
     """
     user_msg = last_user_message(state)
     if not user_msg:
@@ -235,18 +228,10 @@ def refine_itinerary(state: GraphState) -> GraphState:
 
     logger.debug(f"Refinement agent processing: {user_msg[:100]}")
 
-    # Detect refinement intent
+    # Detect simple hotel selection (1, 2, 3)
     intent = detect_refinement_intent(user_msg)
 
-    if not intent:
-        # No refinement detected, let other agents handle
-        logger.debug("No refinement intent detected")
-        return state
-
-    action = intent.get("action")
-
-    # Handle hotel selection
-    if action == "select_hotel":
+    if intent and intent.get("action") == "select_hotel":
         selection_idx = intent.get("selection_index", 0)
         success = handle_hotel_selection(state, selection_idx)
 
@@ -255,95 +240,20 @@ def refine_itinerary(state: GraphState) -> GraphState:
             hotel = components.get("accommodation", {})
             hotel_name = hotel.get("name", "Hotel")
 
-            response = f"Perfect! I've updated your accommodation to **{hotel_name}**. "
-            response += "Your itinerary has been updated. Would you like to adjust anything else?"
+            response = f"Perfect! I've selected **{hotel_name}**. Confirming your selection..."
             add_message(state, AIMessage(content=response))
 
-            # Mark that user has made selections
-            state.setdefault("ui_flags", {})["has_selections"] = True
+            # Mark that hotel is selected AND confirmed - triggers activities research
+            ui_flags = state.setdefault("ui_flags", {})
+            ui_flags["hotel_selected"] = True
+            ui_flags["hotel_confirmed"] = True
+            logger.info(f"✓ Hotel selected and confirmed: {hotel_name}. Ready for activities research.")
         else:
             add_message(state, AIMessage(content="Sorry, I couldn't find that hotel option. Could you specify hotel 1, 2, or 3?"))
-
-    # Handle activity swap
-    elif action == "swap_activity":
-        target = intent.get("target", "")
-        success, component_id = handle_activity_swap(state, target, user_msg)
-
-        if success:
-            response = f"Got it! I'll help you swap that activity. What would you like to do instead?"
-            add_message(state, AIMessage(content=response))
-
-            # Store pending swap for next agent to handle
-            state.setdefault("pending_actions", []).append({
-                "type": "activity_swap",
-                "component_id": component_id,
-                "user_request": user_msg
-            })
-        else:
-            add_message(state, AIMessage(content=f"I couldn't find '{target}' in your itinerary. Could you be more specific?"))
-
-    # Handle budget/price preference changes
-    elif action == "change_budget":
-        preference = intent.get("preference", "cheaper")
-        components = state.get("itinerary_components", {})
-        current_hotel = components.get("accommodation", {})
-        alternatives = current_hotel.get("alternatives", [])
-
-        if alternatives:
-            # Find the cheapest alternative
-            all_hotels = [current_hotel] + alternatives
-            # Sort by price_per_night (handle both dict and object formats)
-            try:
-                sorted_hotels = sorted(
-                    all_hotels,
-                    key=lambda h: h.get("price_per_night", h.get("price", 999999))
-                    if isinstance(h, dict)
-                    else getattr(h, "price_per_night", 999999)
-                )
-                cheapest = sorted_hotels[0]
-                cheapest_name = cheapest.get("name", "Hotel") if isinstance(cheapest, dict) else getattr(cheapest, "name", "Hotel")
-                cheapest_price = cheapest.get("price_per_night", 0) if isinstance(cheapest, dict) else getattr(cheapest, "price_per_night", 0)
-
-                # Update to cheapest option
-                from core.component_registry import register_component
-
-                # Prepare component data
-                if isinstance(cheapest, dict):
-                    cheapest_data = dict(cheapest)
-                else:
-                    cheapest_data = {
-                        "name": cheapest.name,
-                        "description": cheapest.description,
-                        "price_per_night": cheapest.price_per_night,
-                        "features": cheapest.features,
-                        "location": cheapest.location,
-                    }
-
-                cheapest_data["alternatives"] = [h for h in sorted_hotels if h != cheapest]
-                cheapest_data["selected"] = True
-
-                register_component(
-                    state,
-                    component_data=cheapest_data,
-                    component_type="accommodation"
-                )
-
-                response = f"I've updated your accommodation to **{cheapest_name}** (${cheapest_price}/night), which is the most budget-friendly option. Your itinerary has been updated!"
-                add_message(state, AIMessage(content=response))
-                state.setdefault("ui_flags", {})["has_selections"] = True
-                logger.info(f"✓ Switched to cheaper accommodation: {cheapest_name}")
-            except Exception as e:
-                logger.error(f"Error sorting hotels by price: {e}")
-                response = "I found your request for a cheaper option. Here are the accommodation options sorted by price - which would you prefer?"
-                add_message(state, AIMessage(content=response))
-        else:
-            response = "I understand you're looking for a more budget-friendly option. Unfortunately, I don't have alternative accommodations loaded yet. Would you like me to search for different options?"
-            add_message(state, AIMessage(content=response))
-
-    # Handle time modifications
-    elif action == "modify_time":
-        response = "I can help adjust the timing. Which specific activity would you like to move, and to what time?"
-        add_message(state, AIMessage(content=response))
+    else:
+        # No hotel selection detected - LLM router should handle other cases
+        logger.debug("No simple hotel selection detected. LLM router should have handled this.")
+        add_message(state, AIMessage(content="I'm not sure what you'd like to adjust. Could you clarify?"))
 
     return state
 
