@@ -35,6 +35,7 @@ streamlit_UI/.env.example
 agents/Archieve.py
 logs/
 .DS_Store
+logs/backend_debug3.log
 -e 
 # Environment files
 *.env
