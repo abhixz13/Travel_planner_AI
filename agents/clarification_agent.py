@@ -261,12 +261,24 @@ I'll help you create the perfect trip in minutes. Just tell me where you want to
         if hint not in (None, "", {}, []):
             info["destination_hint"] = hint
 
+        # Check if destination was already confirmed by discovery agent
+        destination_already_confirmed = bool(info.get("destination"))
+
         for key in [
             "origin", "destination", "departure_date", "return_date",
             "duration_days", "trip_purpose", "travel_pack", "constraints"
         ]:
             val = _normalize_value(parsed.get(key))
+
+            # CRITICAL FIX: Don't overwrite destination if it was already confirmed
+            if key == "destination" and destination_already_confirmed and not val:
+                logger.info(f"Preserving existing destination: {info['destination']}")
+                continue
+
             if val in (None, "", {}, []):
+                # Don't remove destination if it exists and was confirmed
+                if key == "destination" and destination_already_confirmed:
+                    continue
                 if key in info:
                     info.pop(key, None)
                 continue
@@ -275,7 +287,9 @@ I'll help you create the perfect trip in minutes. Just tell me where you want to
                 text_val = str(val).strip()
                 if text_val and _looks_like_hint(text_val):
                     info["destination_hint"] = text_val
-                    info.pop("destination", None)
+                    # Only remove destination if it wasn't already confirmed
+                    if not destination_already_confirmed:
+                        info.pop("destination", None)
                     continue
             info[key] = val
 

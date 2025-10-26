@@ -221,7 +221,11 @@ def find_activities(state: GraphState) -> Optional[Dict[str, Any]]:
     try:
         result = agent.invoke(
             {"messages": [SystemMessage(content=context)]},
-            config={"tags": ["agent:activities"], "metadata": {"node": "fetch_activities"}},
+            config={
+                "tags": ["agent:activities"],
+                "metadata": {"node": "fetch_activities"},
+                "recursion_limit": 50,  # Allow more steps for complex research
+            },
         )
     except Exception as exc:
         logger.exception("Activities agent invocation failed.")

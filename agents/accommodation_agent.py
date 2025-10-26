@@ -291,7 +291,11 @@ def find_accommodation(state: GraphState) -> Optional[Dict[str, Any]]:
     try:
         result = agent.invoke(
             {"messages": [SystemMessage(content=context)]},
-            config={"tags": ["agent:accommodation"], "metadata": {"node": "fetch_accommodation"}},
+            config={
+                "tags": ["agent:accommodation"],
+                "metadata": {"node": "fetch_accommodation"},
+                "recursion_limit": 50,  # Allow more steps for complex research
+            },
         )
     except Exception as exc:
         logger.exception("Accommodation agent invocation failed.")

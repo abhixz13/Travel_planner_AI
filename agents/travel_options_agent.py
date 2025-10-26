@@ -260,7 +260,11 @@ def find_travel_options(state: GraphState) -> Optional[Dict[str, Any]]:
     try:
         result = agent.invoke(
             {"messages": [SystemMessage(content=context)]},
-            config={"tags": ["agent:travel"], "metadata": {"node": "fetch_travel_options"}},
+            config={
+                "tags": ["agent:travel"],
+                "metadata": {"node": "fetch_travel_options"},
+                "recursion_limit": 50,  # Allow more steps for complex research
+            },
         )
     except Exception as exc:
         logger.exception("Travel agent invocation failed.")
